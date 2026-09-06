@@ -12,9 +12,15 @@ Two things follow, and both are deliberate:
 * The state-changing routes are all ``POST`` under ``/prototype/api/``, so the
   application's global CSRF gate (``security.init_csrf``) covers every one of
   them with no exemption of any kind. Nothing here weakens it.
-* The **trainer** surfaces are still fixture-backed, and the results screen
-  still computes its demonstration numbers in the browser. Those belong to
-  Batches 4 and 5. What is real after this batch is the learner workstation.
+* The **trainer** surfaces are real as of Batch 5. Every student, group,
+  assessment, assignment, attempt, session row and analytics figure on them
+  comes from persisted RewindSec 2.0 records, resolved through
+  :mod:`rewindsec.management`. They are authorization-gated: the whole trainer
+  surface, pages and API alike, is behind the application's real instructor
+  authentication, injected as ``require_trainer`` rather than inferred from a
+  URL prefix, and the blueprint fails closed when no guard is supplied.
+  ``trainer_fixtures.py`` survives only for standalone visual development and
+  is imported by no production trainer route.
 
 The blueprint is mounted under one prefix and owns one template directory and
 one static directory. Deleting this package, ``templates/prototype/``,
@@ -25,10 +31,15 @@ Nothing here touches the database, the sandbox, the telemetry ledger, the
 deterministic core, or any v1 module.
 """
 
-from flask import Blueprint, abort, jsonify, render_template, request, session
+from flask import (Blueprint, abort, jsonify, redirect, render_template,
+                   request, session)
 
+from rewindsec.management import assessment_policy
+from rewindsec.management import projection as trainer_view
 from rewindsec.prototype import fixtures
-from rewindsec.prototype.api import SESSION_KEY, register_workstation_api
+from rewindsec.prototype.api import (SELF_DIRECTED_MODES, SESSION_KEY,
+                                     register_workstation_api)
+from rewindsec.prototype.trainer_api import register_trainer_api
 
 #: Endpoints a learner actually sits in front of during a session.
 #:
@@ -46,7 +57,9 @@ LEARNER_ENDPOINTS = frozenset({
 })
 
 
-def create_prototype_blueprint(service_factory=None, updates=None):
+def create_prototype_blueprint(service_factory=None, updates=None,
+                               management_factory=None,
+                               require_trainer=None):
     """Build the ``/prototype`` blueprint.
 
     A factory rather than a module-level object so the application decides
@@ -57,11 +70,31 @@ def create_prototype_blueprint(service_factory=None, updates=None):
     its update broker. Passed in rather than imported so this module never
     reaches for the application object, and so a test can mount the API on a
     service backed by a throwaway database.
+
+    ``management_factory`` is the same arrangement for the Batch 5
+    :class:`~rewindsec.management.service.ManagementService`, and
+    ``require_trainer`` is the authorization decorator every trainer surface
+    is wrapped in. Both are injected rather than imported: this module has no
+    business knowing how this deployment authenticates a trainer, and a test
+    can mount the console on a throwaway database with a guard of its own.
+
+    **Fail closed.** When ``require_trainer`` is not supplied, the default
+    guard below refuses every trainer request. An unconfigured deployment
+    therefore exposes no student, group, assessment or result data at all --
+    the same posture ``security.instructor_auth_configured`` already takes for
+    the v1 dashboard.
     """
     bp = Blueprint("prototype", __name__, url_prefix="/prototype")
 
+    if require_trainer is None:
+        require_trainer = _refuse_all
+
     if service_factory is not None:
-        register_workstation_api(bp, service_factory, updates)
+        register_workstation_api(bp, service_factory, updates,
+                                 management_factory=management_factory)
+
+    if management_factory is not None:
+        register_trainer_api(bp, management_factory, require_trainer)
 
     # -- shared template context ------------------------------------------
 
@@ -76,15 +109,18 @@ def create_prototype_blueprint(service_factory=None, updates=None):
     BANNERS = {
         "workstation": (
             "RewindSec 2.0 — this workstation runs on a real persisted "
-            "simulation session. Scoring, the threat engine and the trainer "
-            "records are not implemented yet."),
+            "simulation session, driven by the training engine and scored by "
+            "the RewindSec 2.0 rubric when it ends."),
         "results": (
-            "The timeline, decisions, consequence chains and evidence on this "
-            "page come from your real session. The numeric scores are an "
-            "authored demonstration, not RewindSec 2.0 scoring."),
+            "The timeline, decisions, consequence chains, evidence and the six "
+            "dimension scores on this page all come from your real session, "
+            "scored once by the RewindSec 2.0 rubric when it ended."),
         "trainer": (
-            "Trainer console — fixture data. Student, group, assessment and "
-            "analytics records are not implemented yet."),
+            "Trainer console — real persisted RewindSec 2.0 records. Students, "
+            "groups, assessments, assignments, attempts and results are "
+            "stored; every analytics figure is derived from stored sessions, "
+            "and a figure that cannot be derived is shown as unavailable "
+            "rather than estimated."),
         "entry": (
             "RewindSec 2.0. Entering the workstation creates a real, "
             "persisted training session you can leave and come back to."),
@@ -141,11 +177,25 @@ def create_prototype_blueprint(service_factory=None, updates=None):
 
     @bp.route("/start")
     def entry():
-        """Focus and mode selection. No Easy/Medium/Hard control exists."""
+        """Focus and mode selection, plus enrolment. No difficulty control.
+
+        The mode list is the architecture-owned self-directed vocabulary:
+        Practice, Simulation and Assessment.  The Assessment choice delegates
+        to the server-owned Attempt policy; it never creates a bare
+        Assessment-mode TrainingSession.
+
+        The assigned assessments and the enrolment state on this page are
+        fetched from the real learner API by the page's own script; nothing
+        about who this browser is, or what they have been assigned, is
+        rendered from a fixture.
+        """
+        modes = [mode for mode in fixtures.scen.MODES
+                 if mode["id"] in SELF_DIRECTED_MODES]
         return render_template(
             "prototype/entry.html",
             focus_options=fixtures.scen.FOCUS_OPTIONS,
-            modes=fixtures.scen.MODES,
+            modes=modes,
+            assessments_available=management_factory is not None,
             cadence=fixtures.scen.CADENCE)
 
     @bp.route("/workstation")
@@ -180,91 +230,79 @@ def create_prototype_blueprint(service_factory=None, updates=None):
             dimensions=fixtures.scen.SCORE_DIMENSIONS)
 
     # -- trainer surfaces --------------------------------------------------
+    #
+    # Real as of Batch 5. Every value on these pages comes from persisted
+    # RewindSec 2.0 records through ``rewindsec.management.projection``; none
+    # of them reads ``trainer_fixtures``. Where a figure cannot be derived
+    # from stored data the projection returns ``None`` and the template shows
+    # a dash -- a fixture number presented as a measurement is the one thing
+    # these screens must never do.
+    #
+    # Each route is wrapped in ``require_trainer`` explicitly. The guard is
+    # not inferred from the ``/trainer`` prefix: a page that was authorized
+    # because of its URL would lose its authorization the moment somebody
+    # moved it.
 
-    @bp.route("/trainer")
+    def trainer_page(rule, endpoint):
+        def decorate(view):
+            bp.add_url_rule(rule, endpoint, require_trainer(view),
+                            methods=["GET"])
+            return view
+        return decorate
+
+    def _require_console():
+        if management_factory is None:
+            # No management service configured: the console has nothing real
+            # to show, and showing something unreal is not the alternative.
+            abort(503)
+        return management_factory()
+
+    @trainer_page("/trainer", "trainer_dashboard")
     def trainer_dashboard():
-        snapshot = fixtures.trainer_snapshot()
-        sessions = sorted(snapshot["sessions"], key=lambda s: s["started"],
-                          reverse=True)
         return render_template(
             "prototype/trainer_dashboard.html",
-            snapshot=snapshot, sessions=sessions,
+            view=trainer_view.dashboard(_require_console()),
             active="dashboard")
 
-    @bp.route("/trainer/students")
+    @trainer_page("/trainer/students", "trainer_students")
     def trainer_students():
-        snapshot = fixtures.trainer_snapshot()
-        rows = []
-        for student in snapshot["students"]:
-            detail = fixtures.student_detail(student["id"])
-            completed = [s for s in detail["sessions"]
-                         if s["status"] == "complete"]
-            latest = completed[-1] if completed else None
-            rows.append({
-                "student": student,
-                "groups": detail["groups"],
-                "sessions": detail["sessions"],
-                "assignments": detail["assignments"],
-                "latest": latest,
-            })
         return render_template(
             "prototype/trainer_students.html",
-            snapshot=snapshot, rows=rows, active="students")
-
-    @bp.route("/trainer/students/<student_id>")
-    def trainer_student(student_id):
-        detail = fixtures.student_detail(student_id)
-        if detail is None:
-            abort(404)
-        return render_template(
-            "prototype/trainer_student.html",
-            snapshot=fixtures.trainer_snapshot(), detail=detail,
+            view=trainer_view.students_overview(_require_console()),
             active="students")
 
-    @bp.route("/trainer/groups")
-    def trainer_groups():
-        snapshot = fixtures.trainer_snapshot()
-        rows = [fixtures.group_detail(group["id"])
-                for group in snapshot["groups"]]
-        return render_template(
-            "prototype/trainer_groups.html",
-            snapshot=snapshot, rows=rows, active="groups")
-
-    @bp.route("/trainer/groups/<group_id>")
-    def trainer_group(group_id):
-        detail = fixtures.group_detail(group_id)
+    @trainer_page("/trainer/students/<student_id>", "trainer_student")
+    def trainer_student(student_id):
+        detail = trainer_view.student_detail(_require_console(), student_id)
         if detail is None:
             abort(404)
+        return render_template("prototype/trainer_student.html",
+                               view=detail, active="students")
+
+    @trainer_page("/trainer/groups", "trainer_groups")
+    def trainer_groups():
         return render_template(
-            "prototype/trainer_group.html",
-            snapshot=fixtures.trainer_snapshot(), detail=detail,
+            "prototype/trainer_groups.html",
+            view=trainer_view.groups_overview(_require_console()),
             active="groups")
 
-    @bp.route("/trainer/assessments")
+    @trainer_page("/trainer/groups/<group_id>", "trainer_group")
+    def trainer_group(group_id):
+        detail = trainer_view.group_detail(_require_console(), group_id)
+        if detail is None:
+            abort(404)
+        return render_template("prototype/trainer_group.html",
+                               view=detail, active="groups")
+
+    @trainer_page("/trainer/assessments", "trainer_assessments")
     def trainer_assessments():
-        snapshot = fixtures.trainer_snapshot()
-        rows = []
-        for assessment in snapshot["assessments"]:
-            groups = []
-            students = []
-            for row in snapshot["assignments"]:
-                if row["assessment_id"] != assessment["id"]:
-                    continue
-                if row["source"] == "group":
-                    group = snapshot["index"]["groups_by_id"].get(
-                        row["group_id"])
-                    if group:
-                        groups.append(group)
-                else:
-                    student = snapshot["index"]["students_by_id"].get(
-                        row["student_id"])
-                    if student:
-                        students.append(student)
-            rows.append({"assessment": assessment, "groups": groups,
-                         "students": students})
         return render_template(
             "prototype/trainer_assessments.html",
-            snapshot=snapshot, rows=rows, active="assessments")
+            view=trainer_view.assessments_overview(_require_console()),
+            assessment_capacities=assessment_policy.capacity_by_focus(),
+            assessment_runtime_policy_version=(
+                assessment_policy.ASSESSMENT_RUNTIME_POLICY_VERSION),
+            active="assessments")
 
     # -- fixture API -------------------------------------------------------
 
@@ -298,36 +336,43 @@ def create_prototype_blueprint(service_factory=None, updates=None):
         return jsonify(fixtures.learner_snapshot())
 
     @bp.route("/api/assignment-provenance")
+    @require_trainer
     def api_assignment_provenance():
         """Where a student already receives an assessment from, if anywhere.
 
-        Read-only lookup behind the duplicate-assignment warning in
-        architecture §27. It answers "where did this come from", not "is it
-        already assigned", because the trainer cannot decide anything useful
-        from a boolean.
+        Kept at its original path -- the trainer console has linked to it
+        since the UI prototype -- but the data behind it is real as of Batch 5
+        and the route is trainer-authorized. It answers "where did this come
+        from", not "is it already assigned", because a boolean is not
+        something a trainer can act on.
+
+        The canonical name for this is
+        ``/prototype/api/trainer/assignment-sources``; this alias forwards to
+        exactly the same view rather than reimplementing the lookup, so the
+        two can never drift into different answers.
         """
-        assessment_id = request.args.get("assessment_id", "")
-        student_id = request.args.get("student_id", "")
-        if not assessment_id or not student_id:
-            return jsonify({"ok": False,
-                            "error": "assessment_id and student_id required"}), 400
-
-        snapshot = fixtures.trainer_snapshot()
-        if assessment_id not in snapshot["index"]["assessments_by_id"]:
-            return jsonify({"ok": False, "error": "unknown assessment"}), 404
-        if student_id not in snapshot["index"]["students_by_id"]:
-            return jsonify({"ok": False, "error": "unknown student"}), 404
-
-        sources = fixtures.existing_assignment_sources(assessment_id,
-                                                       student_id)
-        student = snapshot["index"]["students_by_id"][student_id]
-        assessment = snapshot["index"]["assessments_by_id"][assessment_id]
-        return jsonify({
-            "ok": True,
-            "student": {"id": student["id"], "name": student["name"]},
-            "assessment": {"id": assessment["id"], "name": assessment["name"]},
-            "existing_sources": sources,
-            "duplicate": bool(sources),
-        })
+        if management_factory is None:
+            abort(503)
+        return redirect(
+            "/prototype/api/trainer/assignment-sources?%s"
+            % request.query_string.decode("ascii", "ignore"), code=307)
 
     return bp
+
+
+def _refuse_all(view):
+    """The fail-closed trainer guard used when the application supplies none.
+
+    Returns 403 for every request, including the page routes. A deployment
+    that has not wired real instructor authentication must not serve student
+    records, results or analytics to anyone -- and must not do so *quietly*,
+    which is why this refuses rather than redirecting to a login that may not
+    exist.
+    """
+    def guarded(*args, **kwargs):
+        return jsonify({"error": {
+            "code": "forbidden",
+            "message": "Trainer authorization is not configured.",
+        }}), 403
+    guarded.__name__ = getattr(view, "__name__", "guarded")
+    return guarded

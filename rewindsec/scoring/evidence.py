@@ -32,13 +32,15 @@ import hashlib
 from rewindsec.scoring import opportunities as opp
 from rewindsec.scoring import rubric
 from rewindsec.scoring.versions import EVIDENCE_MODEL_VERSION
+from rewindsec.management import session_link
 from rewindsec.workstation.bootstrap import NS_DECISIONS
 from rewindsec.workstation.content import index as ix
 
 _evidence_fact_id = ix.evidence_fact_id
 _evidence_source = ix.evidence_source
 
-__all__ = ["Evidence", "build_evidence"]
+__all__ = ["Evidence", "build_evidence", "decision_records",
+           "OpportunityResolution", "resolve_opportunities"]
 
 _EVIDENCE_ID_LABEL = "rewindsec2/scoring-evidence-id/v1"
 
@@ -228,6 +230,125 @@ def _decision_evidence(session, decision_id, state, definition, record_id=None):
     return items
 
 
+def decision_records(session):
+    """Public alias of :func:`_decision_records`.
+
+    Batch 5 needs the same ``(decision_id, occurrence_key) -> record`` map
+    this module already builds in order to count *scored interactions* for an
+    assessment attempt, and it must be the same map -- a second, parallel
+    reading of :data:`NS_DECISIONS` is exactly how two subsystems come to
+    disagree about what a learner decided. Nothing about the mapping changes;
+    this only gives it a name outside this module.
+    """
+    return _decision_records(session)
+
+
+class OpportunityResolution(object):
+    """One :class:`~rewindsec.scoring.opportunities.Opportunity` and whether a
+    decision that resolves it was actually recorded.
+
+    ``resolved_pair`` is the exact ``(decision_id, occurrence_key)`` pair that
+    matched, or ``None`` when the opportunity was ignored. ``record_id`` is
+    the occurrence-scoped storage key that decision was recorded under.
+    """
+
+    __slots__ = ("opportunity", "resolved_pair", "decision_id", "record_id",
+                 "state", "definition")
+
+    def __init__(self, opportunity, resolved_pair=None, decision_id=None,
+                 record_id=None, state=None, definition=None):
+        self.opportunity = opportunity
+        self.resolved_pair = resolved_pair
+        self.decision_id = decision_id
+        self.record_id = record_id
+        self.state = state
+        self.definition = definition
+
+    @property
+    def resolved(self):
+        return self.resolved_pair is not None
+
+
+def resolve_opportunities(session):
+    """Match every presented Opportunity against the decisions recorded.
+
+    Extracted verbatim from :func:`build_evidence`, which now calls it, so
+    there is exactly one implementation of "did a decision that resolves this
+    occurrence actually get recorded" in the system. Batch 5's assessment
+    progress reads the same answer rather than re-deriving it.
+
+    Returns ``(resolutions, tracked_pairs, decisions)``:
+
+    ``resolutions``
+        One :class:`OpportunityResolution` per presented opportunity, in the
+        opportunity model's own deterministic order. An ignored opportunity is
+        present and unresolved -- it never disappears.
+    ``tracked_pairs``
+        Every ``(decision_id, occurrence_key)`` pair consulted, whether or not
+        it matched. :func:`build_evidence` uses it to tell an ordinary
+        operational decision apart from one that belongs to an opportunity.
+    ``decisions``
+        The :func:`decision_records` map the matching ran against.
+
+    Pure: reads the session's world, consumes no randomness, advances no
+    clock and persists nothing.
+
+    For an Assessment carrying an exact v2 completion boundary, only the
+    boundary's N admitted ``(opportunity_id, decision_record_id)`` pairs may
+    resolve. A decision recorded later against an already-visible opportunity
+    remains in factual history but cannot become N+1. Non-Assessment and
+    pre-boundary sessions retain the ordinary Batch 4 behaviour. The final
+    evidence-set filter is applied by :func:`build_evidence`, because an
+    unadmitted opportunity must contribute neither decision evidence nor
+    ``ignored`` evidence to the bounded result.
+    """
+    decisions = _decision_records(session)
+    opportunities = opp.build_opportunities(session)
+    admitted = session_link.admitted_scored_resolutions(session)
+
+    tracked_pairs = set()
+    # A fallback (unscoped) match is consumed the first time it resolves an
+    # opportunity -- otherwise one unscoped record could "resolve" every
+    # occurrence that shares its decision class, which is exactly the
+    # double-counting occurrence scoping exists to prevent. An exact scoped
+    # match never needs this: two occurrences never share a
+    # ``(decision_id, occurrence_key)`` pair in the first place.
+    consumed = set()
+    resolutions = []
+    for opportunity in opportunities:
+        candidates = [(d, opportunity.occurrence_key)
+                     for d in opportunity.resolving_decisions]
+        if opportunity.occurrence_key is not None:
+            # A decision recorded before occurrence scoping existed for its
+            # class (or one whose class never needed it, e.g. a report/reply
+            # decision that already carries its own occurrence in its id) is
+            # still stored unscoped -- fall back to the bare class so those
+            # keep resolving exactly the one opportunity they always did.
+            candidates.extend((d, None) for d in opportunity.resolving_decisions)
+        tracked_pairs.update(candidates)
+
+        if admitted is None:
+            resolved = next((pair for pair in candidates
+                             if pair in decisions and pair not in consumed),
+                            None)
+        else:
+            admitted_record_id = admitted.get(opportunity.opportunity_id)
+            resolved = next((pair for pair in candidates
+                             if pair in decisions and pair not in consumed
+                             and decisions[pair][1] == admitted_record_id),
+                            None)
+        if resolved is None:
+            resolutions.append(OpportunityResolution(opportunity))
+            continue
+        consumed.add(resolved)
+        decision_id, record_id, state, definition = decisions[resolved]
+        resolutions.append(OpportunityResolution(
+            opportunity, resolved_pair=resolved, decision_id=decision_id,
+            record_id=record_id, state=state, definition=definition))
+
+    return tuple(resolutions), tracked_pairs, decisions
+
+
 def build_evidence(session):
     """Derive the whole Evidence Graph for one (usually completed) session.
 
@@ -259,46 +380,24 @@ def build_evidence(session):
     order.
     """
     items = []
-    decisions = _decision_records(session)
-    opportunities = opp.build_opportunities(session)
+    resolutions, tracked_pairs, decisions = resolve_opportunities(session)
+    admitted = session_link.admitted_scored_resolutions(session)
 
-    # Every ``(decision_id, occurrence_key)`` pair consulted below, whether or
-    # not it actually resolved anything -- this is what the trailing loop uses
-    # to tell "an ordinary decision with no tracked opportunity" apart from
-    # "a decision that resolves *some* opportunity, just not this session's".
-    # A decision recorded scoped to one occurrence (say, credentials submitted
-    # for the second phishing occurrence) must never be treated as having
-    # resolved a *different* occurrence's opportunity for the same semantic
-    # class, so only the exact ``(decision_id, occurrence_key)`` pair -- or,
-    # for opportunities with no occurrence identity at all, the legacy
-    # unscoped pair -- ever counts as a match.
-    tracked_pairs = set()
-    # A fallback (unscoped) match, below, is consumed the first time it
-    # resolves an opportunity -- otherwise one unscoped record could
-    # "resolve" every occurrence that shares its decision class, which is
-    # exactly the double-counting occurrence scoping exists to prevent. An
-    # exact scoped match never needs this: two occurrences never share a
-    # ``(decision_id, occurrence_key)`` pair in the first place.
-    consumed = set()
-    for opportunity in opportunities:
-        candidates = [(d, opportunity.occurrence_key)
-                     for d in opportunity.resolving_decisions]
-        if opportunity.occurrence_key is not None:
-            # A decision recorded before occurrence scoping existed for its
-            # class (or one whose class never needed it, e.g. a report/reply
-            # decision that already carries its own occurrence in its id) is
-            # still stored unscoped -- fall back to the bare class so those
-            # keep resolving exactly the one opportunity they always did.
-            candidates.extend((d, None) for d in opportunity.resolving_decisions)
-        tracked_pairs.update(candidates)
-
-        resolved = next((pair for pair in candidates
-                        if pair in decisions and pair not in consumed), None)
-        if resolved is not None:
-            consumed.add(resolved)
-            decision_id, record_id, state, definition = decisions[resolved]
-            items.extend(_decision_evidence(session, decision_id, state,
-                                            definition, record_id=record_id))
+    for resolution in resolutions:
+        opportunity = resolution.opportunity
+        # The v2 boundary is the attempt's complete scoreable set, not merely
+        # an allow-list of positive decisions. An already-visible unrelated
+        # opportunity therefore contributes neither a late decision nor an
+        # ``ignored opportunity`` penalty. Its delivery and any later action
+        # remain in the immutable session history; they are simply outside
+        # the N interactions this Assessment definition asked to score.
+        if (admitted is not None
+                and opportunity.opportunity_id not in admitted):
+            continue
+        if resolution.resolved:
+            items.extend(_decision_evidence(
+                session, resolution.decision_id, resolution.state,
+                resolution.definition, record_id=resolution.record_id))
             continue
 
         for dimension in opportunity.dimensions:

@@ -55,7 +55,8 @@ from rewindsec.scoring.dimensions import DIMENSION_IDS
 from rewindsec.workstation.bootstrap import NS_AUTH_REQUESTS, NS_INCIDENTS, NS_MAIL
 from rewindsec.workstation.content import index as ix
 
-__all__ = ["Opportunity", "build_opportunities"]
+__all__ = ["Opportunity", "build_opportunities",
+           "primary_candidate_capacity"]
 
 #: Bumped only if this record's own persisted shape changes incompatibly --
 #: distinct from the evidence/rubric/scoring versions, since a change here
@@ -125,6 +126,38 @@ _CONTAINMENT_DIMENSIONS = ("incident_response",)
 #: from "a recovery opportunity existed and was ignored" (not N/A).
 _RECOVERY_RESOLUTIONS = ("d-ransom-recover",)
 _RECOVERY_DIMENSIONS = ("recovery_quality",)
+
+
+def primary_candidate_capacity(candidate):
+    """How many directly-presented scoreable opportunities *candidate* owns.
+
+    This is the scoring registry's side of Assessment feasibility.  It counts
+    only primary mail/MFA arrivals that have an authored Opportunity mapping.
+    Recurring mail ids come from the runtime recurrence registry and MFA
+    recurrence comes from the candidate's own occurrence cap.  Derived
+    containment/recovery opportunities are intentionally excluded; they may
+    still occur and score as consequences, but completion never relies on a
+    learner taking the harmful path that unlocks them.
+    """
+    occurrences = candidate.max_occurrences
+    if occurrences is None:
+        raise ValueError(
+            "scoreable candidate %r needs a finite occurrence cap"
+            % candidate.candidate_id)
+    occurrences = int(occurrences)
+    if candidate.activity == "mail":
+        # Late import keeps the scoring opportunity vocabulary independent of
+        # training catalogue construction (catalogue imports family modules).
+        from rewindsec.training import recurrence
+        mail_ids = recurrence.OCCURRENCE_MAIL_IDS.get(candidate.candidate_id)
+        if mail_ids is None:
+            mail_ids = (candidate.content_ref,)
+        return sum(1 for mail_id in mail_ids[:occurrences]
+                   if mail_id in _MAIL_RESOLUTIONS)
+    if candidate.activity == "mfa":
+        return (occurrences if candidate.content_ref in _PROMPT_RESOLUTIONS
+                else 0)
+    return 0
 
 
 class Opportunity(object):

@@ -2510,7 +2510,34 @@
     } catch (err) { /* history is unavailable; the URL is only decoration */ }
   }
 
+  /* Two ways in, and they are not interchangeable.
+   *
+   * ?assessment=<id> starts (or resumes) an Assessment *attempt*: the server
+   * resolves who this browser is from the signed cookie, checks that the
+   * assessment has actually been assigned to them, applies the retry policy
+   * and derives the focus and the mode from the definition. The id in the
+   * query string is a request to be checked, never an authorisation — a
+   * learner who edits it is asking for an assessment they were not given,
+   * and is refused.
+   *
+   * Everything else is a self-directed run, where focus and mode are the
+   * learner's own choices. For `mode=assessment` the same generic endpoint
+   * delegates to the server-owned self-directed Attempt policy; it never
+   * directly constructs a bare Assessment session. */
   function startNew() {
+    var assessmentId = param('assessment');
+    if (assessmentId) {
+      return request('/prototype/api/session/assessment/start', {
+        method: 'POST',
+        body: { assessment_id: assessmentId }
+      }).then(adopt).catch(function (error) {
+        if (error && error.status === 409
+            && error.code === 'session_active') {
+          return refresh();
+        }
+        throw error;
+      });
+    }
     return request('/prototype/api/session/start', {
       method: 'POST',
       body: { focus: param('focus') || 'mixed', mode: param('mode') || 'simulation' }

@@ -5,11 +5,14 @@
 <div class="pw-tr-head">
   <div class="pw-tr-head-main">
     <h1>Students</h1>
-    <p>Minimal identity: a display name, an employee reference and a cohort.
-    Nothing else is held.</p>
+    <p>Minimal identity: a display name, an optional organisational reference
+    and an optional cohort label. Nothing else is held. Group membership —
+    not the cohort label — is what actually carries an assessment to a
+    learner.</p>
   </div>
 </div>
 
+{% if view.rows %}
 <div class="pw-tablewrap">
   <table class="pw-table">
     <thead>
@@ -21,41 +24,42 @@
         <th scope="col">Sessions</th>
         <th scope="col">Most recent score</th>
         <th scope="col">Status</th>
+        <th scope="col">Enrolment</th>
       </tr>
     </thead>
     <tbody>
-      {% for row in rows %}
+      {% for row in view.rows %}
       <tr>
         <td>
           <span class="pw-row" style="gap:.55rem;flex-wrap:nowrap">
             <span class="pw-avatar is-neutral" aria-hidden="true">{{ row.student.initials }}</span>
             <span style="min-width:0">
-              <a href="{{ url_for('prototype.trainer_student', student_id=row.student.id) }}">{{ row.student.name }}</a>
-              <div class="pw-xsmall pw-muted">{{ row.student.ref }}</div>
+              <a href="{{ url_for('prototype.trainer_student', student_id=row.student.student_id) }}">{{ row.student.display_name }}</a>
+              <div class="pw-xsmall pw-muted">{{ row.student.reference or row.student.student_id }}</div>
             </span>
           </span>
         </td>
-        <td>{{ row.student.cohort }}</td>
+        <td>{{ row.student.cohort or '—' }}</td>
         <td class="pw-xsmall">
           {% if row.groups %}
             {% for group in row.groups %}
-            <div><a href="{{ url_for('prototype.trainer_group', group_id=group.id) }}">{{ group.name }}</a></div>
+            <div><a href="{{ url_for('prototype.trainer_group', group_id=group.group_id) }}">{{ group.name }}</a></div>
             {% endfor %}
           {% else %}<span class="pw-muted">None</span>{% endif %}
         </td>
         <td class="pw-xsmall">
           {% if row.assignments %}
             {% for assignment in row.assignments %}
-            <div>{{ assignment.assessment.name }}
+            <div>{{ row.assignment_names[loop.index0] }}
               <span class="pw-muted">· {{ assignment.origin_label }}</span></div>
             {% endfor %}
           {% else %}<span class="pw-muted">None</span>{% endif %}
         </td>
-        <td class="is-num">{{ row.sessions|length }}</td>
+        <td class="is-num">{{ row.session_count }}</td>
         <td class="is-num">
-          {% if row.latest %}
+          {% if row.latest and row.latest.score is not none %}
             <span class="pw-strong">{{ row.latest.score }}</span>
-            <div class="pw-xsmall pw-muted">{{ row.latest.started }}</div>
+            <div class="pw-xsmall pw-muted">{{ row.latest.started or '' }}</div>
           {% else %}<span class="pw-muted">—</span>{% endif %}
         </td>
         <td>
@@ -65,9 +69,124 @@
             <span class="pw-chip">{{ row.student.status|capitalize }}</span>
           {% endif %}
         </td>
+        {#- Enrolment: how a real browser becomes this student.
+
+            A student a trainer created is unbound until somebody claims
+            them, and until then their groups and assignments reach nobody.
+            The code minted here is single-use and is shown once; the
+            student's own persistent learner reference is never displayed,
+            here or anywhere else, because anyone who saw it could claim
+            that person's whole history. -#}
+        <td class="pw-xsmall">
+          {% if row.student.learner_ref %}
+            <span class="pw-chip is-good">Enrolled</span>
+          {% else %}
+            <button type="button" class="pw-btn is-sm is-quiet"
+                    data-enrol-student="{{ row.student.student_id }}">
+              Enrolment code
+            </button>
+            <div class="pw-xsmall pw-muted"
+                 data-enrol-out="{{ row.student.student_id }}"></div>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+{% else %}
+<div class="pw-card pw-empty">
+  <h3>No students yet</h3>
+  <p>A student record is created when a trainer adds one, or the first time
+  a learner starts a session in this deployment. Nothing is listed until
+  there is something stored.</p>
+</div>
+{% endif %}
+
+<section class="pw-section">
+  <div class="pw-section-head">
+    <h2>Add a student</h2>
+    <p>The learner reference this record is owned by is minted on the server.
+    It is never chosen by a client, which is what makes "whose session is
+    this?" a question with one answer.</p>
+  </div>
+  <div class="pw-assign">
+    <div class="pw-assign-grid">
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-student-name">Display name</label>
+        <input class="pw-input" id="pw-new-student-name" type="text"
+               autocomplete="off" maxlength="120">
+      </div>
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-student-ref">Reference (optional)</label>
+        <input class="pw-input" id="pw-new-student-ref" type="text"
+               autocomplete="off" maxlength="64">
+      </div>
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-student-cohort">Cohort label (optional)</label>
+        <input class="pw-input" id="pw-new-student-cohort" type="text"
+               autocomplete="off" maxlength="64">
+        <p class="pw-hint">Presentation only. Membership decides who receives
+        an assessment.</p>
+      </div>
+    </div>
+    <div class="pw-assign-foot">
+      <p class="pw-assign-status" id="pw-new-student-status" role="status"></p>
+      <button type="button" class="pw-btn is-primary" id="pw-new-student-btn">Add student</button>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block tr_scripts %}
+<script src="{{ url_for('static', filename='prototype/trainer.js') }}" defer></script>
+<script>
+/* Mint one single-use enrolment code for one unbound student.
+ *
+ * Presentation and one POST. The code is shown exactly once, in the row it
+ * belongs to, and is not stored anywhere in this page: it is a secret to be
+ * handed to one learner, not a roster column. Nothing here reads or displays
+ * a learner reference. */
+(function () {
+  var meta = document.querySelector('meta[name="csrf-token"]');
+  var token = meta ? meta.getAttribute('content') : '';
+
+  document.addEventListener('click', function (event) {
+    var button = event.target.closest
+      ? event.target.closest('[data-enrol-student]') : null;
+    if (!button) { return; }
+    var studentId = button.getAttribute('data-enrol-student');
+    var out = document.querySelector(
+      '[data-enrol-out="' + studentId + '"]');
+    button.disabled = true;
+    fetch('/prototype/api/trainer/students/'
+          + encodeURIComponent(studentId) + '/enrollment-code', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-CSRF-Token': token},
+      body: '{}'
+    }).then(function (r) { return r.json(); }).then(function (payload) {
+      if (payload && payload.enrollment && out) {
+        out.innerHTML = '';
+        var code = document.createElement('code');
+        code.textContent = payload.enrollment.code;
+        var note = document.createElement('div');
+        note.className = 'pw-xsmall pw-muted';
+        note.textContent = 'Give this to the learner. It works once.';
+        out.appendChild(code);
+        out.appendChild(note);
+        button.hidden = true;
+      } else if (out) {
+        out.textContent = (payload && payload.error && payload.error.message)
+          || 'A code could not be created.';
+        button.disabled = false;
+      }
+    }).catch(function () {
+      if (out) { out.textContent = 'A code could not be created.'; }
+      button.disabled = false;
+    });
+  });
+}());
+</script>
 {% endblock %}

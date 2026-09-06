@@ -5,12 +5,13 @@
 <div class="pw-tr-head">
   <div class="pw-tr-head-main">
     <h1>Assessments</h1>
-    <p>An assessment is defined by the number of scored interactions it
+    <p>An assessment is defined by the number of <b>scored interactions</b> it
     requires, not by a raw event count — benign traffic varies between
     attempts, so counting events would not make two attempts comparable.</p>
   </div>
 </div>
 
+{% if view.rows %}
 <div class="pw-tablewrap">
   <table class="pw-table">
     <thead>
@@ -18,41 +19,61 @@
         <th scope="col">Assessment</th>
         <th scope="col">Focus</th>
         <th scope="col">Scored interactions</th>
-        <th scope="col">Window</th>
+        <th scope="col">Attempts allowed</th>
         <th scope="col">Assigned to</th>
+        <th scope="col">Attempts</th>
         <th scope="col">Status</th>
       </tr>
     </thead>
     <tbody id="pw-assessment-rows">
-      {% for row in rows %}
-      <tr data-assessment-row="{{ row.assessment.id }}">
+      {% for row in view.rows %}
+      <tr data-assessment-row="{{ row.assessment.assessment_id }}">
         <td>
           <b>{{ row.assessment.name }}</b>
+          {% if row.assessment.note %}
           <div class="pw-xsmall pw-muted">{{ row.assessment.note }}</div>
+          {% endif %}
+          {% if row.assessment.window_label %}
+          <div class="pw-xsmall pw-muted">{{ row.assessment.window_label }}</div>
+          {% endif %}
         </td>
         <td><span class="pw-chip is-plain">{{ row.assessment.focus|capitalize }}</span></td>
         <td class="is-num">{{ row.assessment.required_interactions }}</td>
-        <td class="pw-xsmall">{{ row.assessment.window }}</td>
-        <td class="pw-xsmall" data-targets="{{ row.assessment.id }}">
-          {% for group in row.groups %}
+        <td class="is-num">{{ row.assessment.max_attempts }}
+          <div class="pw-xsmall pw-muted">{{ row.assessment.retry_policy }}</div>
+        </td>
+        <td class="pw-xsmall" data-targets="{{ row.assessment.assessment_id }}">
+          {% for entry in row.groups %}
           <div><span class="pw-prov-source is-group">group</span>
-            <a href="{{ url_for('prototype.trainer_group', group_id=group.id) }}">{{ group.name }}</a></div>
+            <a href="{{ url_for('prototype.trainer_group', group_id=entry.group.group_id) }}">{{ entry.group.name }}</a></div>
           {% endfor %}
-          {% for student in row.students %}
+          {% for entry in row.students %}
           <div><span class="pw-prov-source is-direct">direct</span>
-            <a href="{{ url_for('prototype.trainer_student', student_id=student.id) }}">{{ student.name }}</a></div>
+            <a href="{{ url_for('prototype.trainer_student', student_id=entry.student.student_id) }}">{{ entry.student.display_name }}</a></div>
           {% endfor %}
           {% if not row.groups and not row.students %}
           <span class="pw-muted">Not assigned</span>
           {% endif %}
+        </td>
+        <td class="is-num pw-xsmall">
+          {{ row.attempts_completed }} complete<br>
+          {{ row.attempts_active }} in progress<br>
+          {{ row.attempts_abandoned }} abandoned
         </td>
         <td>
           {% if row.assessment.status == 'open' %}
             <span class="pw-chip is-good">Open</span>
           {% elif row.assessment.status == 'scheduled' %}
             <span class="pw-chip is-accent">Scheduled</span>
-          {% else %}
+          {% elif row.assessment.status == 'draft' %}
+            <span class="pw-chip is-accent">Draft</span>
+          {% elif row.assessment.status == 'closed' %}
             <span class="pw-chip">Closed</span>
+          {% else %}
+            {#- No silent fallthrough. Only 'open' starts an attempt, so a
+                status this template does not recognise must be shown as
+                itself rather than quietly rendered as one that does. -#}
+            <span class="pw-chip">{{ row.assessment.status|capitalize }}</span>
           {% endif %}
         </td>
       </tr>
@@ -60,12 +81,19 @@
     </tbody>
   </table>
 </div>
+{% else %}
+<div class="pw-card pw-empty">
+  <h3>No assessments yet</h3>
+  <p>Create one below. Nothing is listed until there is a stored definition
+  to list.</p>
+</div>
+{% endif %}
 
 <section class="pw-section">
   <div class="pw-section-head">
     <h2>Assign an existing assessment</h2>
-    <p>Assigning to a student who already receives the assessment through a
-    group is allowed — but never silently.</p>
+    <p>Assigning to a learner who already receives the assessment is allowed —
+    but never silently, and never by replacing the route they already have.</p>
   </div>
 
   <div class="pw-assign">
@@ -73,8 +101,8 @@
       <div class="pw-field">
         <label class="pw-label" for="pw-assign-assessment">Assessment</label>
         <select class="pw-select" id="pw-assign-assessment">
-          {% for assessment in snapshot.assessments %}
-          <option value="{{ assessment.id }}">{{ assessment.name }}</option>
+          {% for assessment in view.assessments %}
+          <option value="{{ assessment.assessment_id }}">{{ assessment.name }}</option>
           {% endfor %}
         </select>
       </div>
@@ -90,11 +118,8 @@
       <div class="pw-field" id="pw-assign-student-field">
         <label class="pw-label" for="pw-assign-student">Student</label>
         <select class="pw-select" id="pw-assign-student">
-          {% for student in snapshot.students %}
-          <option value="{{ student.id }}"
-            {% if student.id == 'stu-devika-raghavan' %}selected{% endif %}>
-            {{ student.name }} — {{ student.ref }}
-          </option>
+          {% for student in view.students %}
+          <option value="{{ student.student_id }}">{{ student.display_name }}{% if student.reference %} — {{ student.reference }}{% endif %}</option>
           {% endfor %}
         </select>
       </div>
@@ -102,8 +127,8 @@
       <div class="pw-field" id="pw-assign-group-field" hidden>
         <label class="pw-label" for="pw-assign-group">Group</label>
         <select class="pw-select" id="pw-assign-group">
-          {% for group in snapshot.groups %}
-          <option value="{{ group.id }}">{{ group.name }}</option>
+          {% for group in view.groups %}
+          <option value="{{ group.group_id }}">{{ group.name }}</option>
           {% endfor %}
         </select>
       </div>
@@ -111,15 +136,16 @@
 
     <div class="pw-assign-foot">
       <p class="pw-assign-status" id="pw-assign-status" role="status">
-        Try “Q3 judgement check” for Devika Raghavan — she already receives it
-        through Operations — Cohort A.
+        Assigning a group resolves to its current members on the server, so a
+        member who already holds the assessment raises the same warning a
+        direct assignment would.
       </p>
       <button type="button" class="pw-btn is-primary" id="pw-assign-btn">Assign</button>
     </div>
   </div>
 
   <div class="pw-log" id="pw-assign-log" style="margin-top:.9rem" hidden>
-    <b class="pw-xsmall">Assignments made in this prototype session</b>
+    <b class="pw-xsmall">Assignments made in this visit</b>
     <ul id="pw-assign-loglist"></ul>
   </div>
 </section>
@@ -127,8 +153,10 @@
 <section class="pw-section">
   <div class="pw-section-head">
     <h2>Create an assessment</h2>
-    <p>Prototype only. Nothing is persisted; the new row appears in the table
-    above for the rest of this page visit.</p>
+    <p>Product controls only. There is no field here for an organisation
+    profile, a threat-family probability, an event ordering, a seed, a
+    learner difficulty or a scoring weight — an assessment says what must be
+    demonstrated and how many times.</p>
   </div>
 
   <div class="pw-assign">
@@ -141,46 +169,60 @@
       <div class="pw-field">
         <label class="pw-label" for="pw-new-focus">Focus</label>
         <select class="pw-select" id="pw-new-focus">
-          <option value="mixed">Mixed</option>
-          <option value="phishing">Phishing</option>
-          <option value="ransomware">Ransomware</option>
-          <option value="mfa">MFA</option>
-          <option value="bec">BEC</option>
+          <option value="mixed" data-capacity="{{ assessment_capacities.mixed }}">Mixed</option>
+          <option value="phishing" data-capacity="{{ assessment_capacities.phishing }}">Phishing</option>
+          <option value="ransomware" data-capacity="{{ assessment_capacities.ransomware }}">Ransomware</option>
+          <option value="mfa" data-capacity="{{ assessment_capacities.mfa }}">MFA</option>
+          <option value="bec" data-capacity="{{ assessment_capacities.bec }}">BEC</option>
         </select>
       </div>
       <div class="pw-field">
         <label class="pw-label" for="pw-new-interactions">Required scored interactions</label>
         <input class="pw-input" id="pw-new-interactions" type="number"
-               min="1" max="20" value="6" inputmode="numeric">
-        <p class="pw-hint">Not an event count. Benign traffic between scored
-        interactions varies by attempt.</p>
+               min="1" max="{{ assessment_capacities.mixed }}" value="6"
+               inputmode="numeric" aria-describedby="pw-new-capacity">
+        <p class="pw-hint" id="pw-new-capacity"
+           data-policy-version="{{ assessment_runtime_policy_version }}">
+          Mixed supports 1–{{ assessment_capacities.mixed }} scored
+          interactions under the current versioned runtime policy. Benign
+          traffic is never counted.</p>
       </div>
       <div class="pw-field">
-        <label class="pw-label" for="pw-new-target">Initial target</label>
-        <select class="pw-select" id="pw-new-target">
-          <option value="">None for now</option>
-          {% for group in snapshot.groups %}
-          <option value="group:{{ group.id }}">Group — {{ group.name }}</option>
-          {% endfor %}
-          {% for student in snapshot.students %}
-          <option value="student:{{ student.id }}">Student — {{ student.name }}</option>
-          {% endfor %}
+        <label class="pw-label" for="pw-new-attempts">Attempts allowed</label>
+        <input class="pw-input" id="pw-new-attempts" type="number"
+               min="1" max="20" value="1" inputmode="numeric">
+        <p class="pw-hint">Bounded-attempts retry policy. A learner may not
+        start a second attempt while one is still active.</p>
+      </div>
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-status">Status</label>
+        <select class="pw-select" id="pw-new-status">
+          <option value="open">Open</option>
+          <option value="scheduled">Scheduled</option>
+          <option value="draft">Draft</option>
+          <option value="closed">Closed</option>
         </select>
+      </div>
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-window">Window (optional)</label>
+        <input class="pw-input" id="pw-new-window" type="text"
+               autocomplete="off" maxlength="160">
+        <p class="pw-hint">A label shown to trainers. It schedules nothing.</p>
       </div>
     </div>
     <div class="pw-assign-foot">
-      <p class="pw-assign-status" id="pw-new-status" role="status"></p>
+      <p class="pw-assign-status" id="pw-new-status-msg" role="status"></p>
       <button type="button" class="pw-btn" id="pw-new-btn">Create assessment</button>
     </div>
   </div>
 </section>
 
-{# -- duplicate assignment provenance warning (architecture §27) ----------- #}
+{# -- duplicate assignment provenance warning ----------------------------- #}
 <div class="pw-scrim" id="pw-dup-scrim" hidden>
   <div class="pw-dialog" role="dialog" aria-modal="true"
        aria-labelledby="pw-dup-title" id="pw-dup-dialog">
     <div class="pw-dialog-head">
-      <h2 id="pw-dup-title">This student already has this assessment</h2>
+      <h2 id="pw-dup-title">This assessment already reaches these learners</h2>
     </div>
     <div class="pw-dialog-body">
       <p id="pw-dup-lead"></p>
@@ -189,8 +231,8 @@
         <ul id="pw-dup-sources"></ul>
       </div>
       <p class="pw-small pw-muted" style="margin-top:.8rem">
-        Assigning again does not replace the existing route. The student will
-        hold two separately provenanced assignments, and both will be visible
+        Assigning again does not replace the existing route. Each learner will
+        hold separately provenanced assignments, and all of them stay visible
         on their record.
       </p>
     </div>

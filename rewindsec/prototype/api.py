@@ -20,10 +20,40 @@ already believes it is in, which is what makes cross-session access a
 non-question rather than a check that has to be remembered: there is no
 parameter to tamper with.
 
-The learner reference is a per-browser-session opaque token, also minted
+The learner reference is a per-browser-session opaque token, minted
 server-side. It is deliberately not the v1 study identity, not an email
-address and not a database row id -- Batch 5 owns real student records, and
-coupling the two now would make a 2.0 session indistinguishable from a v1 one.
+address and not a database row id. Batch 5 binds it to a persistent
+:class:`~rewindsec.management.records.Student`, and that binding is the *only*
+link between a person and their sessions: it is never accepted from a request
+body, never derived from a display name, and never taken from a URL. A client
+therefore has no parameter through which it could claim somebody else's
+history, in the same way it has no parameter through which it could open
+somebody else's session.
+
+Assessment attempts
+-------------------
+Self-directed Assessment is a real learner choice. The generic start route
+delegates it to the management service, which resolves a versioned,
+system-owned definition for the chosen focus and writes an Attempt before it
+creates the TrainingSession. Assigned Assessment remains the separate
+``/api/session/assessment/start`` path, where the server checks the real
+assignment and uses its preserved provenance.
+
+The invariant this holds is ``Assessment mode => persistent Assessment Attempt
+=> TrainingSession``. It has to be held at the door, because the alternative
+is an Assessment-mode session with no attempt behind it. The generic route
+never directly creates such a session; it can only request the Attempt-backed
+self-directed service path.
+
+Enrolment
+---------
+``/api/enroll`` is how a real browser becomes a *roster* student -- one a
+trainer created, put in groups and assigned assessments to. It takes a
+single-use enrolment code and nothing else: no student id, no learner
+reference, no attempt id and no session id, so there is no parameter through
+which a learner could ask to be somebody else. The binding is written by
+:mod:`rewindsec.management.service`, from the server-minted reference already
+in this browser's signed cookie.
 
 CSRF
 ----
@@ -38,9 +68,12 @@ import json
 
 from flask import Response, jsonify, request, session, stream_with_context
 
+from rewindsec.management.ports import ManagementError, NotFoundError
+from rewindsec.management.service import ManagementRefused
 from rewindsec.workstation import debrief as debrief_module
 from rewindsec.workstation.actions import MAX_BODY_BYTES, parse_action_request
-from rewindsec.workstation.errors import (InternalWorkstationError,
+from rewindsec.workstation.errors import (AssessmentRefusedError,
+                                          InternalWorkstationError,
                                           InvalidRequestError,
                                           NoActiveSessionError,
                                           SessionAlreadyActiveError,
@@ -48,7 +81,14 @@ from rewindsec.workstation.errors import (InternalWorkstationError,
 from rewindsec.workstation.content import index as ix
 
 __all__ = ["register_workstation_api", "SESSION_KEY", "LEARNER_KEY",
-           "SSE_KEEPALIVE_SECONDS", "SSE_MAX_SECONDS"]
+           "SELF_DIRECTED_MODES", "SSE_KEEPALIVE_SECONDS", "SSE_MAX_SECONDS"]
+
+#: The modes a learner may choose for a session they start themselves.
+#:
+#: Exactly the architecture-owned mode vocabulary. Assessment is selectable,
+#: but its creation is delegated to the Attempt service below rather than to
+#: :meth:`WorkstationService.start_session` directly.
+SELF_DIRECTED_MODES = tuple(ix.MODE_IDS)
 
 #: Signed-cookie keys. Namespaced so they cannot collide with the v1 session
 #: values that share the same cookie.
@@ -66,13 +106,21 @@ SSE_KEEPALIVE_SECONDS = 15
 SSE_MAX_SECONDS = 300
 
 
-def register_workstation_api(bp, service_factory, updates):
+def register_workstation_api(bp, service_factory, updates,
+                             management_factory=None):
     """Attach the learner API to the prototype blueprint.
 
     ``service_factory`` is a zero-argument callable returning the configured
     :class:`~rewindsec.workstation.service.WorkstationService`. A callable
     rather than an instance so the blueprint never has to be constructed after
     the database, and so a test can swap the whole service out.
+
+    ``management_factory`` is the same arrangement for the Batch 5
+    :class:`~rewindsec.management.service.ManagementService`. When it is
+    ``None`` the learner API still works exactly as it did -- sessions are
+    created, acted on and ended -- but they are recorded with no student
+    owner, and the assessment-attempt routes answer that assessments are
+    unavailable rather than pretending an attempt was made.
     """
 
     # -- helpers ----------------------------------------------------------
@@ -138,7 +186,7 @@ def register_workstation_api(bp, service_factory, updates):
         mode = payload.get("mode", "simulation")
         if focus not in ix.FOCUS_IDS:
             raise InvalidRequestError("That focus is not one of the options.")
-        if mode not in ix.MODE_IDS:
+        if mode not in SELF_DIRECTED_MODES:
             raise InvalidRequestError("That mode is not one of the options.")
         return focus, mode
 
@@ -153,19 +201,76 @@ def register_workstation_api(bp, service_factory, updates):
             return None
         return simulation if simulation.is_active else None
 
+    def management():
+        """The management service, or ``None`` when this app has none."""
+        return None if management_factory is None else management_factory()
+
+    def register_ownership(session_id, attempt_id=None):
+        """Bind a freshly created session to its persistent Student.
+
+        Best-effort by design: a failure to record the administrative
+        ownership row must never destroy a session the learner is already in.
+        The session's own ``learner_ref`` remains the authoritative owner
+        either way -- every access check in
+        :mod:`rewindsec.workstation.service` compares that and nothing else --
+        so an unregistered session is *unowned in the console*, never
+        misattributed.
+        """
+        manager = management()
+        if manager is None:
+            return None
+        try:
+            return manager.register_session(session_id, learner_ref(),
+                                            attempt_id=attempt_id)
+        except (ManagementError, ManagementRefused):
+            return None
+
+    def sync_attempt_for(session_id):
+        """Reconcile the attempt bound to this session, if there is one."""
+        manager = management()
+        if manager is None:
+            return None
+        try:
+            attempt = manager.attempt_for_session(session_id)
+            return manager.sync_attempt(attempt)
+        except (ManagementError, ManagementRefused):
+            return None
+
     def create(service, focus, mode):
+        if mode == "assessment":
+            manager = management()
+            if manager is None:
+                raise InvalidRequestError(
+                    "Self-directed Assessment is not available here.")
+            try:
+                attempt, created = manager.start_self_directed_attempt(
+                    learner_ref(), focus)
+            except ManagementRefused as exc:
+                raise AssessmentRefusedError(
+                    exc.message, detail=exc.detail, code=exc.code)
+            except ManagementError:
+                raise InternalWorkstationError()
+            session[SESSION_KEY] = attempt.session_id
+            session.modified = True
+            return ok({
+                "attempt": manager.attempt_state(attempt),
+                "resumed": not created,
+                "snapshot": service.snapshot(attempt.session_id,
+                                             learner_ref()),
+            }, 201 if created else 200)
         session_id = service.start_session(learner_ref(), focus, mode)
         session[SESSION_KEY] = session_id
         session.modified = True
+        register_ownership(session_id)
         return ok({"snapshot": service.snapshot(session_id, learner_ref())}, 201)
 
     @bp.route("/api/session/start", methods=["POST"])
     def api_session_start():
         """Create a server-side session and remember it in the signed cookie.
 
-        The focus and the mode are the learner's own choices and are the only
-        things a client may supply. The session id, the root seed, the clock
-        and every id inside the session are minted here.
+        Focus and mode are the learner's own choices. Practice/Simulation
+        create an ordinary session; Assessment delegates to the system-policy
+        Attempt path and therefore cannot create a bare Assessment session.
 
         Refused with 409 if this browser already has an *active* session. A
         session is a factual record -- a world, a ledger, an action log -- and
@@ -195,6 +300,7 @@ def register_workstation_api(bp, service_factory, updates):
         current = live_session(service)
         if current is not None:
             service.end_session(current.session_id, learner_ref())
+            sync_attempt_for(current.session_id)
         return create(service, focus, mode)
 
     @bp.route("/api/session", methods=["GET"])
@@ -233,6 +339,11 @@ def register_workstation_api(bp, service_factory, updates):
             raise NoActiveSessionError("There is no training session open.")
         body()
         snapshot = service.end_session(session_id, learner_ref())
+        # The attempt's result is *read* from the session's now-finalized,
+        # immutable Batch 4 ScoringResult -- never recomputed here. Doing it
+        # at the moment the session ends keeps the trainer console readable
+        # without loading every session; doing it again later is a no-op.
+        sync_attempt_for(session_id)
         return ok({"snapshot": snapshot})
 
     @bp.route("/api/session/debrief", methods=["GET"])
@@ -244,6 +355,208 @@ def register_workstation_api(bp, service_factory, updates):
             raise NoActiveSessionError("There is no training session open.")
         simulation = service.require_owned(session_id, learner_ref())
         return ok({"debrief": debrief_module.debrief_document(simulation)})
+
+    # -- assessments (Batch 5) ---------------------------------------------
+    #
+    # An Assessment attempt is the one kind of session a learner does not
+    # configure. They name an assessment they have been assigned; the server
+    # resolves who they are from the signed cookie, checks that an effective
+    # assignment actually reaches them, applies the assessment's retry policy,
+    # and derives the focus and the mode from the definition. There is no
+    # parameter here for a focus, a mode, a seed, a difficulty or a scaffolding
+    # profile, and no attempt id is ever accepted from a client.
+
+    def require_management():
+        manager = management()
+        if manager is None:
+            raise InvalidRequestError("Assessments are not available here.")
+        return manager
+
+    @bp.route("/api/enroll", methods=["POST"])
+    def api_enroll():
+        """Claim a roster student with a single-use enrolment code.
+
+        The whole request is one code. The server reads *who this browser is*
+        from the signed cookie -- the same server-minted reference every
+        session it has ever created is owned by -- and binds that reference to
+        the student the code names. Nothing about the identity comes from the
+        request.
+
+        Three refusals, and they are deliberately not distinguishable from
+        each other: an unknown code, a code somebody else has already spent,
+        and a revoked one all answer the same thing. Telling them apart would
+        let a stranger use this endpoint to discover which codes exist and
+        which roster students have already enrolled.
+
+        Idempotent for the browser that already holds the binding: re-posting
+        the same code -- a double-submitted form, a reload, a retried fetch --
+        returns the same student rather than a second binding or an error.
+        """
+        manager = require_management()
+        payload = body()
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("The request body must be a JSON object.")
+        unknown = sorted(set(payload) - {"code", "csrf_token"})
+        if unknown:
+            # Named explicitly, because the fields somebody would *try* to add
+            # here are exactly student_id and learner_ref.
+            raise InvalidRequestError(
+                "Unrecognised field(s): %s." % ", ".join(unknown))
+        code = payload.get("code")
+        if not isinstance(code, str) or not code.strip() or len(code) > 128:
+            raise InvalidRequestError("An enrolment code is required.")
+
+        try:
+            student, bound = manager.claim_enrollment(learner_ref(),
+                                                      code.strip())
+        except ManagementRefused as exc:
+            raise AssessmentRefusedError(exc.message, detail=exc.detail,
+                                         code=exc.code)
+        except ManagementError:
+            raise InternalWorkstationError()
+        # The display name and the id of the student this browser now *is*.
+        # No learner reference, no enrolment code and no other student.
+        return ok({"enrolled": True, "newly_bound": bool(bound),
+                   "student": {"id": student.student_id,
+                               "name": student.display_name,
+                               "reference": student.reference,
+                               "cohort": student.cohort}},
+                  201 if bound else 200)
+
+    @bp.route("/api/me", methods=["GET"])
+    def api_me():
+        """Which persistent student this browser currently is.
+
+        Read-only, and provisions nothing: a browser that has never trained
+        and never enrolled answers ``{"student": null}`` rather than being
+        given an identity by the act of asking.
+        """
+        manager = require_management()
+        student = manager.student_for_learner_ref(learner_ref())
+        if student is None:
+            return ok({"student": None})
+        return ok({"student": {"id": student.student_id,
+                               "name": student.display_name,
+                               "reference": student.reference,
+                               "cohort": student.cohort,
+                               "origin": student.origin}})
+
+    @bp.route("/api/assessments", methods=["GET"])
+    def api_assessments():
+        """The assessments assigned to *this* learner, with their attempt state.
+
+        Learner-safe throughout. An attempt's state carries scored-interaction
+        progress and nothing else: no score, no correctness, no disposition,
+        no dimension and no decision id. Progress says how much of the
+        assessment has been handled, never how well.
+        """
+        manager = require_management()
+        student = manager.ensure_student_for_learner_ref(learner_ref())
+        routes = manager.effective_assignments(student.student_id)
+
+        seen, out = set(), []
+        for route in routes:
+            assessment = route.assessment
+            if assessment is None or assessment.assessment_id in seen:
+                continue
+            seen.add(assessment.assessment_id)
+            attempts = [manager.sync_attempt(a) for a in manager.list_attempts(
+                student_id=student.student_id,
+                assessment_id=assessment.assessment_id)]
+            active = next((a for a in attempts if a.is_active), None)
+            out.append({
+                "id": assessment.assessment_id,
+                "name": assessment.name,
+                "focus": assessment.focus,
+                "required_interactions": assessment.required_interactions,
+                "status": assessment.status,
+                "window_label": assessment.window_label,
+                "note": assessment.note,
+                "attempts_used": len(attempts),
+                "max_attempts": assessment.max_attempts,
+                "retry_policy": assessment.retry_policy,
+                "attempts_remaining": max(
+                    0, assessment.max_attempts - len(attempts)),
+                "active_attempt": manager.attempt_state(active),
+                "assigned_via": [
+                    {"source": r.source, "label": r.origin_label}
+                    for r in routes
+                    if r.assignment.assessment_id == assessment.assessment_id],
+            })
+        return ok({"assessments": out})
+
+    @bp.route("/api/session/assessment/start", methods=["POST"])
+    def api_assessment_start():
+        """Start -- or resume -- this learner's attempt at an assessment.
+
+        Resume is the first thing this does, so a closed browser, a refresh or
+        a double-submitted form lands the learner back in the attempt they
+        were already in. It never mints a second attempt for an active one,
+        and therefore never silently spends one of their allowed retries.
+        """
+        manager = require_management()
+        service = service_factory()
+        payload = body()
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("The request body must be a JSON object.")
+        unknown = sorted(set(payload) - {"assessment_id", "csrf_token"})
+        if unknown:
+            raise InvalidRequestError(
+                "Unrecognised field(s): %s." % ", ".join(unknown))
+        assessment_id = payload.get("assessment_id")
+        if not isinstance(assessment_id, str) or not assessment_id                 or len(assessment_id) > 128:
+            raise InvalidRequestError("An assessment id is required.")
+
+        try:
+            attempt, created = manager.start_attempt(learner_ref(),
+                                                     assessment_id)
+        except NotFoundError:
+            raise InvalidRequestError("That assessment does not exist.")
+        except ManagementRefused as exc:
+            raise AssessmentRefusedError(exc.message, detail=exc.detail,
+                                         code=exc.code)
+
+        if not created:
+            # Resuming. A live session for this attempt is put back in the
+            # cookie; one that has since ended is reconciled and reported.
+            attempt = manager.sync_attempt(attempt)
+            if not attempt.is_active or attempt.session_id is None:
+                raise AssessmentRefusedError(
+                    "That attempt has already finished.",
+                    code="attempt_finished")
+
+        current = live_session(service)
+        if created and current is not None                 and current.session_id != attempt.session_id:
+            # A fresh attempt was started while another session was open. The
+            # outgoing one is completed on the record rather than discarded --
+            # it is a factual history, and a new attempt does not erase it.
+            service.end_session(current.session_id, learner_ref())
+            sync_attempt_for(current.session_id)
+
+        session[SESSION_KEY] = attempt.session_id
+        session.modified = True
+        return ok({
+            "attempt": manager.attempt_state(attempt),
+            "resumed": not created,
+            "snapshot": service.snapshot(attempt.session_id, learner_ref()),
+        }, 201 if created else 200)
+
+    @bp.route("/api/session/assessment", methods=["GET"])
+    def api_session_assessment():
+        """The attempt state for the caller's current session, if it is one.
+
+        ``{"attempt": null}`` for a self-directed Practice or Simulation run:
+        those legitimately have no assessment and no attempt, and saying so is
+        not an error.
+        """
+        manager = require_management()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        # Establishes ownership before anything about the session is read.
+        service_factory().require_owned(session_id, learner_ref())
+        attempt = manager.sync_attempt(manager.attempt_for_session(session_id))
+        return ok({"attempt": manager.attempt_state(attempt)})
 
     # -- actions -----------------------------------------------------------
 

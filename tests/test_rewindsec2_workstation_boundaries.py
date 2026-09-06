@@ -322,8 +322,14 @@ def test_the_http_adapter_is_the_only_place_flask_appears():
     flask_users = [
         _module_id(path) for path in PROTOTYPE_MODULES
         if "flask" in _imported_top_level_names(path)]
+    # Three, since Batch 5: the learner adapter, the blueprint, and the
+    # trainer adapter. All three are in ``rewindsec/prototype/``, which is the
+    # property this test exists to hold -- nothing in ``domain``, ``core``,
+    # ``workstation``, ``training``, ``scoring``, ``management`` or
+    # ``persistence`` has heard of Flask.
     assert set(flask_users) == {"rewindsec/prototype/api.py",
-                                "rewindsec/prototype/routes.py"}, flask_users
+                                "rewindsec/prototype/routes.py",
+                                "rewindsec/prototype/trainer_api.py"}, flask_users
 
 
 def test_the_http_adapter_depends_on_the_application_layer_not_the_domain():

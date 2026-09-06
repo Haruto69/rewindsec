@@ -24,6 +24,8 @@ from abc import ABC, abstractmethod
 
 __all__ = [
     "SessionRepository",
+    "SessionDirectory",
+    "SessionSummary",
     "SessionAlreadyExistsError",
     "SessionNotFoundError",
     "StaleRevisionError",
@@ -97,4 +99,59 @@ class SessionRepository(ABC):
     @abstractmethod
     def exists(self, session_id):
         """Whether a session with this id is currently stored."""
+        raise NotImplementedError
+
+
+class SessionSummary(object):
+    """The lifecycle facts about one stored session, without loading it.
+
+    Batch 5's trainer console lists sessions -- often a great many more than
+    it displays -- and rehydrating a whole aggregate to read its mode is
+    wasteful and, worse, would make a listing page depend on every stored
+    snapshot still being parseable. This carries exactly the columns the
+    session table already has, and nothing derived from the snapshot.
+    """
+
+    __slots__ = ("session_id", "learner_ref", "focus", "mode", "status",
+                 "revision")
+
+    def __init__(self, session_id, learner_ref, focus, mode, status, revision):
+        self.session_id = session_id
+        self.learner_ref = learner_ref
+        self.focus = focus
+        self.mode = mode
+        self.status = status
+        self.revision = revision
+
+    def to_state(self):
+        return {"session_id": self.session_id, "learner_ref": self.learner_ref,
+                "focus": self.focus, "mode": self.mode, "status": self.status,
+                "revision": self.revision}
+
+    def __repr__(self):
+        return ("SessionSummary(session_id=%r, mode=%s, status=%s)"
+                % (self.session_id, self.mode, self.status))
+
+
+class SessionDirectory(ABC):
+    """A read-only listing view over stored sessions.
+
+    Deliberately a separate port from :class:`SessionRepository` rather than
+    more methods on it. The repository's contract is about *one* aggregate --
+    create it, load it, save it under optimistic concurrency -- and every
+    guarantee in its docstring is about that. Listing is a different concern
+    with different callers (the trainer console, analytics), and keeping it
+    separate means nothing that only reads a listing can accidentally be
+    handed something that can write a session.
+    """
+
+    @abstractmethod
+    def list_summaries(self, learner_refs=None):
+        """Every stored session, or only those owned by the given references.
+
+        Returns a tuple of :class:`SessionSummary`, ordered deterministically
+        by session id. Passing an empty collection returns an empty tuple --
+        never "everything", which is the failure mode a caller filtering by an
+        empty student list must not hit.
+        """
         raise NotImplementedError

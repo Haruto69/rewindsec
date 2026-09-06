@@ -297,13 +297,11 @@ leakage, action, HTTP, resume, SSE, determinism-under-real-time,
 session-lifecycle and download-collision suites
 (`tests/test_rewindsec2_workstation_*.py`).
 
-**What is still fixture-backed, deliberately:** the trainer console (Batch 5)
-and the numeric scores on the results screen (Batch 4). The results page's
-timeline, decisions, causal consequence tree and evidence counts are real and
-come from the persisted session; its six dimension figures are an authored
-browser-side demonstration, labelled as such on the screen, in the API
-(`debrief.scoring.engine == "none"`) and here. **They are not RewindSec 2.0
-scoring and must never be cited as a measurement.**
+**What was still fixture-backed at the time of Batch 2, and is not any more:**
+the numeric scores on the results screen (made real by Batch 4) and the
+trainer console (made real by Batch 5). Both statements are preserved here as
+the record of what Batch 2 shipped, not as a description of the current
+system.
 
 **Persistence:** the three Batch 1 tables (`rewindsec2_*`) are created
 alongside the application's own in `init_db()` with `checkfirst`, so they are
@@ -1036,6 +1034,228 @@ release-queue view), `rewindsec/scoring/opportunities.py` (the
 
 ---
 
+### Batch 5: students, groups, assessments, assignments, attempts, trainer console
+
+**Base commit:** `6f9919f` (*Add deterministic scoring, content pipeline, and
+document viewer*). **Versions:** `rewindsec-assessment-definition/v1`,
+`bounded-attempts/v1` (retry policy), `rewindsec-attempt-stamp/v1`,
+`rewindsec-assessment-boundary/v2`,
+`rewindsec-assessment-runtime-policy/v1`,
+`rewindsec-self-directed-assessment-definition/v1`,
+`rewindsec-scored-interaction/v1`, `rewindsec-trainer-metrics/v2`.
+
+`rewindsec/management/` is the administrative half of RewindSec 2.0: who a
+learner is, which groups they belong to, which assessments they hold and by
+what route, and which attempts they have made. It **consumes** the simulation
+and the Batch 4 scoring system and reimplements neither.
+
+| Path | Role |
+|---|---|
+| `rewindsec/management/records.py` | The storage-independent records: `Student`, `StudentGroup`, `GroupMembership`, `Assessment`, `Assignment`, `Attempt`, `SessionOwnership`, `EnrollmentCode`. Identity is minimal - display name, optional organisational reference, optional cohort label, status - and `cohort` is presentational only, never a substitute for membership. |
+| `rewindsec/management/ports.py` | The repository contract, in the same *port* style `rewindsec/persistence/ports.py` established for the session aggregate. |
+| `rewindsec/persistence/management_adapter.py` | The one adapter: eight `rewindsec2_*` tables on their own MetaData, created with `checkfirst`. Additive - no Batch 1-4 table is altered and no stored session is rewritten. |
+| `rewindsec/management/ids.py` | Identifier minting. `secrets` or SHA-256 derivation; **never** a simulation RNG stream and **never** `hash()`. |
+| `rewindsec/management/assignments.py` | Effective-assignment resolution and duplicate-source lookup, as pure functions. An assignment is a *route*, and routes are never merged. |
+| `rewindsec/management/progress.py` | Assessment progress, counted in **scored interactions** - resolved opportunities from `rewindsec.scoring.evidence.resolve_opportunities`. Never events, messages, elapsed time or scheduler ticks. |
+| `rewindsec/management/assessment_policy.py` | The versioned feasibility rule derived from the live candidate catalogue and scoring opportunity registry, plus stable system-owned self-directed definition ids/defaults. |
+| `rewindsec/management/session_link.py` | The attempt stamp a TrainingSession carries, and the assessment completion boundary, both in its own world namespace - the same pattern `training/state.py` and `scoring/state.py` already use, so no session state version is bumped and neither can reach a learner projection. |
+| `rewindsec/management/analytics.py` | Versioned, extensible trainer metrics derived from stored sessions, each stating its own denominator and each capable of an explicit *unavailable* state. |
+| `rewindsec/management/service.py` | The application service: the only thing that changes a record. |
+| `rewindsec/management/projection.py` | Trainer view models. Reached only through an authorized route. |
+| `rewindsec/prototype/trainer_api.py` | The trainer HTTP adapter. Every route is wrapped in the application's real instructor authentication by the registration helper - never by a URL prefix - and the blueprint fails closed when no guard is supplied. |
+
+**Scored interactions, and the interpretation chosen.** An assessment's
+`required_interactions` is compared against the number of Batch 4
+`Opportunity` records that a recorded decision actually *resolved*, matched by
+the exact `(decision_id, occurrence_key)` rule Batch 4 already implements.
+Where Batch 4 left room, the **narrow** reading was taken: an ignored
+opportunity is presented but not completed. The wider reading - counting an
+ignored opportunity as "interacted with, badly" - was rejected, because an
+assessment a learner completes by ignoring everything is not an assessment.
+Ignoring still costs the learner their score, exactly as Batch 4 already
+scores it; it does not buy them progress. Benign and context traffic produces
+no opportunity at all and therefore cannot move progress; investigation
+records no decision and therefore completes nothing; an idempotent repeat of
+a decision resolves the same occurrence and cannot inflate the count; and two
+occurrences of a recurring surface remain two independently countable
+interactions, which is the behaviour Batch 4 already models.
+
+**Batch 4 is consumed, not replaced.** A completed attempt's result *is* the
+session's own immutable, finalized `ScoringResult`, copied verbatim onto the
+attempt row under the `scoring`/`rubric`/`evidence-model` versions that
+produced it. There is no second "trainer score" anywhere, and nothing in this
+batch recomputes a dimension. `resolve_opportunities` is the one implementation
+of "did a decision that resolves this occurrence get recorded" for progress
+and evidence. For an Assessment with a v2 completion boundary it also reads
+the boundary's exact admitted pairs as the complete scoreable opportunity
+set; an unadmitted opportunity contributes neither a later decision nor an
+ignored-opportunity penalty. Its delivery and any later action remain in
+immutable history. The existing evaluator, dimensions, rubric and weights are
+unchanged and finalize the bounded session once through the existing
+`scoring.state.finalize` path.
+
+**Determinism.** The attempt stamp is a single world value written through
+`mutate_world`. It draws nothing from any RNG stream, schedules nothing and
+advances no clock, and `build_opportunities` never looks at its namespace.
+The same seed and the same learner inputs produce a byte-identical RNG state,
+clock, scheduler and event log with or without it. Administrative timestamps
+use ordinary application time; no simulation decision reads a clock of any
+kind, and `rewindsec/management/` imports `datetime` in exactly one module
+(`service.py`) and `random` in none.
+
+
+#### Batch 5 corrections
+
+Five defects in the first cut of this batch, and what replaced each.
+
+**1. Assessment mode without an Attempt.** Self-directed Assessment is one of
+the three learner-selectable modes. The generic start route delegates that
+choice to `ManagementService.start_self_directed_attempt`; it never calls the
+bare session constructor for Assessment. The service resolves/persists one
+stable system-owned definition per focus, versioned
+`rewindsec-self-directed-assessment-definition/v1`, writes an Attempt with
+`assignment_source = "self_directed"` and null assignment/group ids, and only
+then creates and stamps its TrainingSession. These system definitions do not
+appear in the trainer-created assessment list and cannot be assigned or edited
+through trainer operations. Trainer-assigned starts continue through
+`ManagementService.start_attempt` and retain their real direct/group snapshot.
+`WorkstationService.start_session` still refuses Assessment mode without the
+server-side Attempt assertion. The invariant remains `Assessment mode =>
+Assessment Attempt => TrainingSession`, including the self-directed path.
+
+**2. `required_interactions` was only a progress bar.** A learner could start
+an assessment, resolve one interaction, press End Training and be recorded as
+having *completed* it. Completion is now a rule: an attempt is `completed`
+only if the bound session ended `completed` **and** its resolved
+scored-interaction count met the definition's requirement. Ending early is
+recorded as `abandoned` with `termination_reason = "requirement_unmet"`,
+distinct from `session_abandoned` and `session_missing`, and it still counts
+against the retry limit. The session's own finalized Batch 4 `ScoringResult`
+is stored verbatim either way: the learner's decisions keep their
+consequences and their score, and what ending early costs them is a *valid
+assessment*, not the factual record.
+
+The upper bound is exact. Once the requirement is satisfied, the server writes
+`rewindsec-assessment-boundary/v2` with exactly N admitted
+`(opportunity_id, decision_record_id)` rows plus the simulation time, revision
+and closing learner action. `resolve_opportunities` admits only those pairs to
+Assessment progress, and `build_evidence` treats them as the complete
+scoreable opportunity set. An already-visible N+1 opportunity therefore
+contributes neither a later decision nor an ignored-opportunity penalty to the
+result. `training.engine.evaluate` also declines new primary activity. The
+session does not end at the cutoff: the clock keeps running,
+already-scheduled factual consequences still fire, and later actions remain
+in immutable history. Batch 4 finalizes once against that persisted boundary
+and its result is still the one authoritative score.
+
+**Feasibility.** `rewindsec-assessment-runtime-policy/v1` derives the maximum
+required count from finite, directly scoreable primary candidates in the
+training catalogue and opportunity registry. Current capacities are Phishing
+3, Ransomware 3, MFA 5, BEC 3 and Mixed 14. Conditional containment/recovery
+opportunities are not relied upon for completion. The trainer API rejects a
+larger value and the UI publishes/enforces the focus-specific maximum; it
+never silently clamps. The self-directed definition uses the feasible default
+of 3.
+
+**3. No learner-to-Student binding.** A trainer-created `Student` was given a
+minted `learner_ref` no browser would ever present, so trainer-created
+students, memberships and assignments were not reachable end-to-end and the
+smoke tests seeded the learner cookie by hand. A trainer-created student is
+now created **unbound** (`learner_ref is None`, which means exactly one
+checkable thing: nobody has claimed them), and a trainer mints an
+`EnrollmentCode` - a bounded, single-use, purpose-specific secret, separate
+from the learner reference and shown once. A browser spends it at
+`/api/enroll`, whose entire request is the code: no student id, no learner
+reference, no attempt id and no session id, so there is no parameter through
+which a learner could ask to be somebody else. The claim is one conditional
+`UPDATE` matching only an unclaimed row, so of two browsers presenting the
+same material the database picks one winner; the winner may re-present it
+idempotently, and a second browser is refused. Unknown, spent and revoked
+codes are refused identically, so the endpoint is not an oracle for which
+codes or students exist. A browser already bound to a roster student cannot
+swap onto another. An anonymous auto-provisioned record is *released* rather
+than merged - ownership is established once and never moved, so earlier
+anonymous history stays where it happened instead of being reattributed to a
+named person. The persistent `learner_ref` is never rendered on any screen or
+returned by any API.
+
+**4. `scheduled` was treated as `open`.** The start rule accepted
+`{open, scheduled}` on the grounds that this batch implements no scheduling
+engine - an argument about what the server does *not* do, used to widen what a
+learner *may* do. The approved trainer UI shows the two as different states.
+Only `open` starts an attempt; `scheduled` is visible and assignable and
+refuses; `draft` and `closed` refuse. Releasing a scheduled assessment is the
+explicit act of setting it `open`. **No scheduling automation was invented.**
+
+**5. A misleading false-positive metric.** `false_positive_reports` counted
+"reported something genuine **or** disconnected with nothing to contain" over
+every session analysed - two different operational behaviours under one label
+that described only the first, so no reading of the percentage was true. It is
+now two metrics with two denominators: `false_positive_reports` (sessions that
+reported a genuine work request, over sessions that actually delivered a
+genuine message the learner could have reported) and `unnecessary_isolation`
+(sessions that disconnected the workstation with no incident open, over
+sessions analysed - disconnecting is available in every session from the
+moment it starts). Neither is inferred from the other, neither denominator is
+fabricated, a zero denominator stays `available: false` with a stated reason,
+and the metric set version moved to `rewindsec-trainer-metrics/v2` so a figure
+recorded under the blended definition can never be silently compared with one
+recorded under these. Neither metric is evidence about learning.
+
+**Authorization.** The whole trainer surface - six pages and every API route -
+is behind `security.require_instructor`, injected into the blueprint rather
+than imported by it, and applied by the route-registration helper so an
+unguarded route cannot be added by forgetting a decorator. A learner cookie
+carries no instructor flag and reaches none of it. On the learner side,
+ownership stays exactly what it was: the active session id lives only in the
+signed cookie, no route accepts a session, student, learner or attempt
+identifier, and every read goes through the server-side ownership check.
+
+**Analytics discipline.** Every figure is computed from stored 2.0 sessions.
+Each metric carries `rewindsec-trainer-metrics/v2`, its own definition, its
+own explicit denominator, and - where the stored data cannot support it - an
+`available: false` state that the console renders as a dash with a stated
+reason. **No trainer figure in this batch is authored, illustrative, or
+carried over from `trainer_fixtures.py`.** Those fixtures survive only for
+standalone visual development; no production trainer route, template or
+module reads them, and `tests/test_rewindsec2_trainer_data.py` holds that
+statically. Every metric also carries an interpretation limit that travels
+with the number: these are technical telemetry about authored simulations
+under an authored rubric, and they are **not** measures of competence,
+learning, retention or transfer.
+
+**Legacy and unowned sessions.** A session stored before this batch has no
+`rewindsec2_session_owners` row. It is reported as unowned rather than
+attributed to anybody, its lifecycle columns are still listed, and a stored
+snapshot this build cannot parse is shown as unreadable rather than as absent
+or as somebody's result. No ownership is ever invented.
+
+**Persistence:** eight new `rewindsec2_*` tables, created alongside the
+application's own in `init_db()` with `checkfirst`. Verified additive: the
+Batch 1-4 session, event and action tables keep every column and every row.
+No v1 table is read, written or migrated. The correction added
+`rewindsec2_enrollment_codes` and two nullable columns on
+`rewindsec2_attempts` (`completed_interactions`, `termination_reason`);
+nullable, so a row written before the completion rule existed reads back as
+"never recorded" rather than as "the learner resolved none of them".
+
+New tests: `tests/test_rewindsec2_management_persistence.py`,
+`test_rewindsec2_management_assignments.py`,
+`test_rewindsec2_management_attempts.py`,
+`test_rewindsec2_management_authorization.py`,
+`test_rewindsec2_trainer_data.py`, `test_rewindsec2_assessment_boundary.py`,
+`test_rewindsec2_enrollment.py`, plus `tests/management_helpers.py`.
+Updated: `tests/test_prototype_ui.py` - its trainer-route and
+assignment-provenance tests now exercise the authorization gate and real
+persisted records instead of fixture rows, and the minimal-identity property
+it held of the fixture people is now also held of the `Student` record.
+
+**Explicitly out of scope, and not started:** Docker-backed RewindSec 2.0
+ransomware state (Batch 6). Nothing in this batch touches `docker/`, the
+sandbox backends, or the v1 ransomware demo.
+
+---
+
 ## 7. Quick reference
 
 | Category | Verdict |
@@ -1048,3 +1268,5 @@ release-queue view), `rewindsec/scoring/opportunities.py` (the
 | RewindSec 2.0 results screen | Timeline, decisions, consequence chains, evidence, and (Batch 4) the six dimension scores are all real, server-derived session facts for any session created since Batch 4. A session created before it gets an explicit legacy/unscored projection, never a retroactive score. |
 | RewindSec 2.0 event selection (§6, Batch 3) | Deterministic authored scheduling policy, versioned `training-engine/v1`. No claim is made that it improves learning, retention, realism or difficulty calibration; those require human evidence. |
 | RewindSec 2.0 scoring (§6, Batch 4) | Deterministic, versioned, authored rubric (`rewindsec-scoring/v1`). It is implementation policy, not a validated measure of competence, retention or transfer; those require human research data this system does not collect. |
+| RewindSec 2.0 trainer records (§6, Batch 5) | Real persisted students, groups, many-to-many membership, assessments, assignment provenance and attempts. A completed attempt's result is the session's own finalized `ScoringResult`, stored under the versions that produced it - never a second, recomputed trainer score. |
+| RewindSec 2.0 trainer analytics (§6, Batch 5) | Derived from stored 2.0 sessions, versioned `rewindsec-trainer-metrics/v2`, each with an explicit denominator and an honest unavailable state. Technical telemetry about authored simulations; **not** evidence about competence, learning, retention or transfer. Fixture numbers in `trainer_fixtures.py` are demonstration data only and are never presented as measurements. |

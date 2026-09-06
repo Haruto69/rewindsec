@@ -29,6 +29,7 @@ from rewindsec.prototype import fixtures
 from rewindsec.prototype import scenario_fixtures as scen
 from rewindsec.prototype import trainer_fixtures as trainer
 from rewindsec.prototype import world_fixtures as world
+from tests.conftest import login_instructor
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROTOTYPE_PKG = REPO_ROOT / "rewindsec" / "prototype"
@@ -47,14 +48,21 @@ LEARNER_ROUTES = [
     "/prototype/results",
 ]
 
+#: Batch 5 made these real *and* authorization-gated. They render persisted
+#: student, group, assessment and attempt records, so they are reachable only
+#: with the application's instructor session -- and the detail routes below
+#: need an id that actually exists, which now means one this suite created.
 TRAINER_ROUTES = [
     "/prototype/trainer",
     "/prototype/trainer/students",
-    "/prototype/trainer/students/stu-aarti-venkatesh",
     "/prototype/trainer/groups",
-    "/prototype/trainer/groups/grp-ops-a",
     "/prototype/trainer/assessments",
 ]
+
+
+def trainer_client(flask_app):
+    """A client holding the application's real instructor session."""
+    return login_instructor(flask_app.test_client())
 
 
 @pytest.mark.parametrize("path", LEARNER_ROUTES)
@@ -65,10 +73,22 @@ def test_learner_prototype_routes_render(client, path):
 
 
 @pytest.mark.parametrize("path", TRAINER_ROUTES)
-def test_trainer_prototype_routes_render(client, path):
-    response = client.get(path)
+def test_trainer_prototype_routes_render(flask_app, path):
+    response = trainer_client(flask_app).get(path)
     assert response.status_code == 200, path
     assert b"prototype/trainer.css" in response.data, path
+
+
+@pytest.mark.parametrize("path", TRAINER_ROUTES)
+def test_trainer_prototype_routes_are_not_public(client, path):
+    """The visual layer is unchanged; who may see it is not.
+
+    The authorization behaviour itself is held in
+    tests/test_rewindsec2_management_authorization.py. This is the reminder
+    here, next to the render check, that "it renders" is no longer the whole
+    contract for these paths.
+    """
+    assert client.get(path).status_code in (302, 303), path
 
 
 def test_workstation_renders_a_shell_the_client_fills_from_the_server(client):
@@ -86,9 +106,12 @@ def test_workstation_renders_a_shell_the_client_fills_from_the_server(client):
     assert "northbridge-payroll.example" not in body
 
 
-def test_unknown_student_and_group_404(client):
-    assert client.get("/prototype/trainer/students/nobody").status_code == 404
-    assert client.get("/prototype/trainer/groups/nothing").status_code == 404
+def test_unknown_student_and_group_404(flask_app):
+    trainer = trainer_client(flask_app)
+    assert trainer.get(
+        "/prototype/trainer/students/stu-nobody").status_code == 404
+    assert trainer.get(
+        "/prototype/trainer/groups/grp-nothing").status_code == 404
 
 
 def test_world_endpoint_returns_the_whole_fixture_document(client):
@@ -146,60 +169,106 @@ def test_the_state_changing_routes_are_covered_by_the_global_csrf_gate(client):
 # Assessment assignment provenance (architecture §27)
 # ===========================================================================
 
-PROVENANCE = "/prototype/api/assignment-provenance"
+#: The trainer console's provenance lookup. Batch 5 made it real -- it reads
+#: persisted assignments and current membership -- and trainer-authorized. The
+#: behaviour it backs is held in
+#: tests/test_rewindsec2_management_assignments.py (the rule) and
+#: tests/test_rewindsec2_management_authorization.py (who may ask). What is
+#: left here is the *product* property this screen exists for.
+PROVENANCE = "/prototype/api/trainer/assignment-sources"
 
 
-def test_duplicate_assignment_reports_its_original_source(client):
-    """Devika receives the Q3 check through Operations — Cohort A."""
-    response = client.get(
-        PROVENANCE + "?assessment_id=as-q3-judgement"
-        "&student_id=stu-devika-raghavan")
+def _seed_duplicate_case(flask_app):
+    """One student receiving one assessment through a group. Real records."""
+    with flask_app.app_context():
+        import app as app_module
+        management = app_module.management_service()
+        student = management.create_student("Provenance Learner")
+        group = management.create_group("Provenance Group")
+        management.add_member(group.group_id, student.student_id)
+        assessment = management.create_assessment(
+            "Provenance check", "mixed", 2, status="open")
+        management.assign(assessment.assessment_id, "group", group.group_id)
+        return student, group, assessment
+
+
+def test_duplicate_assignment_reports_its_original_source(flask_app):
+    """The answer is *where it comes from*, never a bare boolean."""
+    student, group, assessment = _seed_duplicate_case(flask_app)
+    trainer = trainer_client(flask_app)
+    response = trainer.get(
+        PROVENANCE + "?assessment_id=%s&student_id=%s"
+        % (assessment.assessment_id, student.student_id),
+        headers={"Accept": "application/json"})
     body = response.get_json()
+
     assert response.status_code == 200
     assert body["duplicate"] is True
     assert len(body["existing_sources"]) == 1
     source = body["existing_sources"][0]
     assert source["source"] == "group"
-    assert source["group_name"] == "Operations — Cohort A"
+    assert source["group_name"] == group.name
     assert source["created"]
     assert source["created_by"]
+    assert source["assignment_id"]
 
 
-def test_a_student_without_the_assessment_is_not_a_duplicate(client):
-    body = client.get(
-        PROVENANCE + "?assessment_id=as-attachment-handling"
-        "&student_id=stu-aarti-venkatesh").get_json()
+def test_a_student_without_the_assessment_is_not_a_duplicate(flask_app):
+    _student, _group, assessment = _seed_duplicate_case(flask_app)
+    trainer = trainer_client(flask_app)
+    with flask_app.app_context():
+        import app as app_module
+        outsider = app_module.management_service().create_student("Outsider")
+
+    body = trainer.get(
+        PROVENANCE + "?assessment_id=%s&student_id=%s"
+        % (assessment.assessment_id, outsider.student_id),
+        headers={"Accept": "application/json"}).get_json()
     assert body["duplicate"] is False
     assert body["existing_sources"] == []
 
 
-def test_provenance_lookup_validates_its_arguments(client):
-    assert client.get(PROVENANCE).status_code == 400
-    assert client.get(
-        PROVENANCE + "?assessment_id=nope&student_id=stu-aarti-venkatesh"
-    ).status_code == 404
-    assert client.get(
-        PROVENANCE + "?assessment_id=as-q3-judgement&student_id=nobody"
-    ).status_code == 404
+def test_provenance_lookup_validates_its_arguments(flask_app):
+    trainer = trainer_client(flask_app)
+    headers = {"Accept": "application/json"}
+    assert trainer.get(PROVENANCE, headers=headers).status_code == 400
+    assert trainer.get(
+        PROVENANCE + "?assessment_id=as-nope&student_id=stu-nope",
+        headers=headers).status_code == 404
 
 
-def test_group_and_direct_assignments_stay_separate_on_a_record():
-    """Aarti holds "Payment authorisation" twice, by two different routes."""
-    detail = fixtures.student_detail("stu-aarti-venkatesh")
-    payments = [a for a in detail["assignments"]
-                if a["assessment"]["id"] == "as-payments"]
-    assert len(payments) == 2
-    assert {a["source"] for a in payments} == {"group", "direct"}
-    # Each row says where it came from, rather than being merged into one.
-    assert len({a["origin_label"] for a in payments}) == 2
+def test_group_and_direct_assignments_stay_separate_on_a_record(flask_app):
+    """A confirmed duplicate is a second row, not a replacement."""
+    student, group, assessment = _seed_duplicate_case(flask_app)
+    with flask_app.app_context():
+        import app as app_module
+        management = app_module.management_service()
+        management.assign(assessment.assessment_id, "student",
+                          student.student_id, confirm_duplicate=True)
+        routes = management.effective_assignments(student.student_id)
+
+    assert len(routes) == 2
+    assert {route.source for route in routes} == {"group", "direct"}
+    assert len({route.origin_label for route in routes}) == 2
 
 
-def test_an_assessment_is_defined_by_scored_interactions_not_event_count():
-    for assessment in trainer.ASSESSMENTS:
-        assert isinstance(assessment["required_interactions"], int)
-        assert assessment["required_interactions"] >= 1
-        assert "event_count" not in assessment
-        assert "events" not in assessment
+def test_an_assessment_is_defined_by_scored_interactions_not_event_count(
+        flask_app):
+    """The definition has a scored-interaction requirement and no event count.
+
+    Held against the *record type*, not against a fixture list: a field named
+    for an event count could not be added without failing here.
+    """
+    from rewindsec.management.records import Assessment
+
+    assert "required_interactions" in Assessment._FIELDS
+    for banned in ("event_count", "events", "duration", "duration_ms",
+                   "tick_count", "elapsed_ms", "message_count"):
+        assert banned not in Assessment._FIELDS, banned
+
+    _student, _group, assessment = _seed_duplicate_case(flask_app)
+    assert isinstance(assessment.required_interactions, int)
+    assert assessment.required_interactions >= 1
 
 
 # ===========================================================================
@@ -245,9 +314,30 @@ def test_the_organisation_and_its_people_are_fictional():
     for contact in world.DIRECTORY:
         assert contact["email"].endswith(fixtures.INERT_SUFFIXES), contact["id"]
     for student in trainer.STUDENTS:
-        # Minimal identity only: a display name, a reference, a cohort.
+        # Minimal identity only: a display name, a reference, a cohort. These
+        # fixture people are retained for standalone visual development; the
+        # production trainer console no longer reads them (Batch 5).
         assert set(student) <= {"id", "name", "ref", "cohort", "initials",
                                 "status"}, student["id"]
+
+
+def test_the_real_student_record_holds_no_more_identity_than_the_fixture():
+    """The property that mattered about the fixture now holds of the record.
+
+    Batch 5 replaced the fixture people with a persisted
+    :class:`~rewindsec.management.records.Student`. The minimal-identity rule
+    has to travel with it, or it was a property of a mock rather than of the
+    product: no address, no date of birth, no contact detail, nothing that
+    would be personal data about a real person.
+    """
+    from rewindsec.management.records import Student
+
+    assert set(Student._FIELDS) == {
+        "student_id", "display_name", "reference", "cohort", "status",
+        "learner_ref", "origin", "created_at"}
+    for banned in ("email", "phone", "address", "date_of_birth", "dob",
+                   "postcode", "national_id", "manager", "photo", "notes"):
+        assert banned not in Student._FIELDS, banned
 
 
 def test_no_attachment_is_an_executable_type():
@@ -384,6 +474,24 @@ def test_practice_and_simulation_differ_in_the_ways_the_architecture_says():
 def test_no_mode_shows_a_score_during_the_attempt():
     for entry in scen.MODES:
         assert entry["flags"]["score_visible_during_attempt"] is False
+
+
+def test_self_directed_assessment_is_selectable_on_the_entry_page(client):
+    body = client.get("/prototype/start").get_data(as_text=True)
+    assert 'name="mode" value="practice"' in body
+    assert 'name="mode" value="simulation"' in body
+    assert 'name="mode" value="assessment"' in body
+
+
+def test_trainer_required_count_uses_the_runtime_capacity(flask_app):
+    from rewindsec.management.assessment_policy import capacity_by_focus
+
+    body = trainer_client(flask_app).get(
+        "/prototype/trainer/assessments").get_data(as_text=True)
+    capacities = capacity_by_focus()
+    assert 'max="40"' not in body
+    for focus, capacity in capacities.items():
+        assert ('value="%s" data-capacity="%d"' % (focus, capacity)) in body
 
 
 def test_cadence_matches_the_mode_semantics():
@@ -727,15 +835,25 @@ def test_the_deterministic_core_modules_were_not_touched():
 # Accessibility affordances that are cheap to lose
 # ===========================================================================
 
-@pytest.mark.parametrize("path", LEARNER_ROUTES + TRAINER_ROUTES)
-def test_every_prototype_page_has_a_skip_link_that_lands_somewhere(client, path):
+def _assert_skip_link_lands(response, path):
     """A skip link pointing at an element that does not exist is worse than
     no skip link: it looks like the page is accessible and is not."""
-    body = client.get(path).data.decode()
+    assert response.status_code == 200, path
+    body = response.data.decode()
     match = re.search(r'class="pw-skip" href="#([A-Za-z0-9_\-]+)"', body)
     assert match, path
     assert 'id="%s"' % match.group(1) in body, (path, match.group(1))
     assert "<main" in body, path
+
+
+@pytest.mark.parametrize("path", LEARNER_ROUTES)
+def test_every_public_prototype_page_has_a_working_skip_link(client, path):
+    _assert_skip_link_lands(client.get(path), path)
+
+
+@pytest.mark.parametrize("path", TRAINER_ROUTES)
+def test_every_protected_trainer_page_has_a_working_skip_link(flask_app, path):
+    _assert_skip_link_lands(trainer_client(flask_app).get(path), path)
 
 
 def test_reduced_motion_is_honoured():
@@ -822,8 +940,8 @@ def test_the_prototype_home_page_is_not_a_learner_surface(client):
 
 
 @pytest.mark.parametrize("path", TRAINER_ROUTES)
-def test_trainer_surfaces_carry_no_learner_clipboard_restriction(client, path):
-    body = client.get(path).data.decode()
+def test_trainer_surfaces_carry_no_learner_clipboard_restriction(flask_app, path):
+    body = trainer_client(flask_app).get(path).data.decode()
     assert 'data-integrity="none"' in body, path
     assert "prototype/integrity.js" not in body, path
     assert "prototype/integrity.css" not in body, path

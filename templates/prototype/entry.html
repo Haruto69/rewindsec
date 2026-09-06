@@ -43,25 +43,44 @@
     </span>
   </div>
 
-  <section class="pw-card" style="margin-bottom:1.9rem">
-    <div class="pw-row is-between" style="align-items:flex-start">
-      <div style="min-width:0">
-        <p class="pw-kicker">Assigned to you</p>
-        <h2>Payment authorisation</h2>
-        <p class="pw-small pw-muted" style="margin-top:.25rem">
-          Assessment · 4 scored interactions · window closes 30 September 2026
-        </p>
-        <p class="pw-small" style="margin-top:.55rem;max-width:52ch">
-          An assessment attempt runs in the same workstation. Nothing is
-          explained while you are in it and no score is shown until you
-          finish.
-        </p>
+  <!-- Enrolment and assigned assessments.
+       Real, and rendered from the learner API rather than from a fixture:
+       ``/prototype/api/me`` says which persistent student this browser is,
+       ``/prototype/api/assessments`` lists what that student has actually
+       been assigned, and ``/prototype/api/enroll`` spends a single-use code
+       to become a student a trainer created. This block starts empty and
+       stays empty when there is nothing true to put in it. -->
+  <section class="pw-card" id="pw-enrol-card" style="margin-bottom:1.9rem"
+           {% if not assessments_available %}hidden{% endif %}>
+    <p class="pw-kicker">Assigned to you</p>
+    <p class="pw-small pw-muted" id="pw-enrol-who" role="status">Checking…</p>
+
+    <div id="pw-assigned-list" hidden style="margin-top:.9rem"></div>
+
+    <p class="pw-small pw-muted" id="pw-assigned-empty" hidden
+       style="margin-top:.6rem;max-width:56ch">
+      Nothing is assigned to this device yet. An assessment runs in the same
+      workstation: nothing is explained while you are in it and no score is
+      shown until you finish.
+    </p>
+
+    <form id="pw-enrol-form" style="margin-top:1.1rem">
+      <label class="pw-small" for="pw-enrol-code" style="display:block">
+        <b>Have an enrolment code?</b>
+      </label>
+      <p class="pw-small pw-muted" style="margin:.25rem 0 .5rem;max-width:56ch">
+        Your trainer gives you one code. It links this device to your place on
+        their roster, and it works once.
+      </p>
+      <div class="pw-row" style="gap:.5rem;flex-wrap:wrap">
+        <input class="pw-input" id="pw-enrol-code" name="code" type="text"
+               autocomplete="off" spellcheck="false" maxlength="128"
+               placeholder="Enrolment code" style="min-width:22ch">
+        <button type="submit" class="pw-btn">Enrol this device</button>
       </div>
-      <a class="pw-btn"
-         href="{{ url_for('prototype.workstation') }}?focus=bec&amp;mode=assessment&amp;assessment=as-payments">
-        Start attempt
-      </a>
-    </div>
+      <p class="pw-small" id="pw-enrol-status" role="status"
+         style="margin-top:.5rem"></p>
+    </form>
   </section>
 
   <form action="{{ url_for('prototype.workstation') }}" method="get"
@@ -145,6 +164,169 @@
 
   form.addEventListener('change', update);
   update();
+}());
+</script>
+
+<script>
+/* Enrolment and assigned assessments.
+ *
+ * Presentation only. Every fact here is read from the learner API, and the
+ * one thing this script can send is an enrolment code the learner typed:
+ * it never sends, constructs or even knows a student id, a learner
+ * reference, an attempt id or a session id. Starting an assessment is a
+ * link to the workstation carrying an assessment id, which the server then
+ * checks against what this learner has actually been assigned — the link
+ * is a request, not an authorisation. */
+(function () {
+  var card = document.getElementById('pw-enrol-card');
+  if (!card || card.hidden) { return; }
+
+  var who = document.getElementById('pw-enrol-who');
+  var list = document.getElementById('pw-assigned-list');
+  var empty = document.getElementById('pw-assigned-empty');
+  var form = document.getElementById('pw-enrol-form');
+  var field = document.getElementById('pw-enrol-code');
+  var status = document.getElementById('pw-enrol-status');
+
+  function token() {
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute('content') : '';
+  }
+
+  function get(url) {
+    return fetch(url, {credentials: 'same-origin',
+                       headers: {'Accept': 'application/json'}})
+      .then(function (r) { return r.json().then(function (b) {
+        return {ok: r.ok, body: b}; }); });
+  }
+
+  function post(url, payload) {
+    return fetch(url, {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-CSRF-Token': token()},
+      body: JSON.stringify(payload)
+    }).then(function (r) { return r.json().then(function (b) {
+      return {ok: r.ok, body: b}; }); });
+  }
+
+  function text(node, value) { node.textContent = value; }
+
+  function renderWho(student) {
+    if (!student) {
+      text(who, 'This device is not enrolled yet.');
+      return;
+    }
+    if (student.origin === 'trainer') {
+      text(who, 'Enrolled as ' + student.name
+        + (student.cohort ? ' · ' + student.cohort : '') + '.');
+      form.hidden = true;
+    } else {
+      text(who, 'Training on this device is currently anonymous.');
+    }
+  }
+
+  function renderAssessments(rows) {
+    list.innerHTML = '';
+    if (!rows || !rows.length) {
+      list.hidden = true;
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    list.hidden = false;
+    rows.forEach(function (row) {
+      var wrap = document.createElement('div');
+      wrap.className = 'pw-row is-between';
+      wrap.style.alignItems = 'flex-start';
+      wrap.style.marginBottom = '.75rem';
+
+      var main = document.createElement('div');
+      main.style.minWidth = '0';
+      var title = document.createElement('b');
+      title.textContent = row.name;
+      var meta = document.createElement('p');
+      meta.className = 'pw-small pw-muted';
+      meta.style.marginTop = '.2rem';
+      /* Required scored interactions, stated because it is part of what
+       * finishing the assessment means — not a progress-bar decoration. */
+      meta.textContent = 'Assessment · ' + row.required_interactions
+        + ' scored interaction' + (row.required_interactions === 1 ? '' : 's')
+        + ' · ' + row.status
+        + (row.window_label ? ' · ' + row.window_label : '');
+      main.appendChild(title);
+      main.appendChild(meta);
+
+      if (row.active_attempt && row.active_attempt.progress) {
+        var p = document.createElement('p');
+        p.className = 'pw-small';
+        p.style.marginTop = '.2rem';
+        p.textContent = 'In progress — '
+          + row.active_attempt.progress.completed + ' of '
+          + row.active_attempt.progress.required + ' handled.';
+        main.appendChild(p);
+      }
+
+      wrap.appendChild(main);
+
+      /* 'open' is the only status an attempt may start from. A scheduled
+       * assessment is shown, because the learner should know it is coming,
+       * and offers no start control, because the server would refuse. */
+      var startable = row.status === 'open'
+        && (row.active_attempt || row.attempts_remaining > 0);
+      if (startable) {
+        var link = document.createElement('a');
+        link.className = 'pw-btn';
+        link.href = '/prototype/workstation?assessment='
+          + encodeURIComponent(row.id);
+        link.textContent = row.active_attempt ? 'Resume attempt'
+                                              : 'Start attempt';
+        wrap.appendChild(link);
+      } else {
+        var note = document.createElement('span');
+        note.className = 'pw-small pw-muted';
+        note.textContent = row.status === 'scheduled'
+          ? 'Not open yet'
+          : (row.status === 'closed' ? 'Closed' : 'No attempts left');
+        wrap.appendChild(note);
+      }
+      list.appendChild(wrap);
+    });
+  }
+
+  function load() {
+    return get('/prototype/api/me')
+      .then(function (r) { renderWho(r.ok ? r.body.student : null); })
+      .then(function () { return get('/prototype/api/assessments'); })
+      .then(function (r) { renderAssessments(r.ok ? r.body.assessments : []); })
+      .catch(function () {
+        text(who, 'Assigned training could not be loaded.');
+      });
+  }
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var code = (field.value || '').trim();
+    if (!code) { text(status, 'Enter the code your trainer gave you.'); return; }
+    text(status, 'Checking…');
+    post('/prototype/api/enroll', {code: code}).then(function (r) {
+      if (!r.ok) {
+        /* The server answers every unusable code the same way, on purpose.
+         * This screen does not embellish it. */
+        text(status, (r.body && r.body.error && r.body.error.message)
+          || 'That enrolment code cannot be used.');
+        return;
+      }
+      field.value = '';
+      text(status, 'This device is now enrolled.');
+      return load();
+    }).catch(function () {
+      text(status, 'That could not be sent. Try again.');
+    });
+  });
+
+  load();
 }());
 </script>
 {% endblock %}

@@ -72,7 +72,16 @@ class Driver(object):
     @classmethod
     def start(cls, service, focus="phishing", mode="simulation",
               learner_ref=LEARNER):
-        session_id = service.start_session(learner_ref, focus, mode)
+        # Assessment mode is refused at the session-creation chokepoint
+        # unless the caller states that a persistent Attempt already exists
+        # (see ``WorkstationService.start_session``). The suites that drive an
+        # assessment-mode session here are exercising simulation, projection
+        # and scoring behaviour, not the enrolment/assignment product flow, so
+        # the driver asserts the binding rather than building a whole
+        # management graph to get one session. The attempt-lifecycle suite
+        # goes through ``ManagementService.start_attempt`` for real.
+        session_id = service.start_session(
+            learner_ref, focus, mode, attempt_bound=(mode == "assessment"))
         return cls(service, session_id, learner_ref)
 
     @property

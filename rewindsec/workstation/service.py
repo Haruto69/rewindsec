@@ -69,12 +69,20 @@ observe no fact, so a refresh -- or ten -- leaves ``capture_state()`` identical.
 
 from rewindsec.core.events import EventSource, EventVisibility
 from rewindsec.core.rng import STREAM_TIMING
+# The assessment boundary is a fact about a *session*, so it is closed
+# here -- the one module allowed to change one -- rather than in the HTTP
+# adapter, where a non-HTTP caller would bypass it. Both imports are leaf
+# modules of the management package: ``session_link`` imports nothing at
+# all and ``progress`` imports only scoring, so neither reaches back into
+# this one and there is no cycle.
+from rewindsec.management import session_link
 from rewindsec.domain.enums import Focus, Mode, SessionStatus, coerce_enum
 from rewindsec.domain.errors import DomainError
 from rewindsec.domain.session import SimulationSession
 from rewindsec.persistence.ports import (SessionNotFoundError,
                                          StaleRevisionError)
 from rewindsec.scoring import state as scoring_state
+from rewindsec.scoring.evidence import resolve_opportunities
 from rewindsec.workstation import bootstrap, clock, consequences, worldops
 from rewindsec.workstation.bootstrap import (NS_AUTH_REQUESTS, NS_BROWSER,
                                              NS_DIRECTORY, NS_FILES,
@@ -161,16 +169,52 @@ class WorkstationService(object):
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start_session(self, learner_ref, focus, mode):
+    def start_session(self, learner_ref, focus, mode, on_created=None,
+                      attempt_bound=False):
         """Create, seed and persist a brand-new session; return its id.
 
         The id and the root seed are both minted here, on the server. Neither
         is ever accepted from a request: an id chosen by a client is an
         invitation to open somebody else's session, and a seed chosen by a
         client is an invitation to pick a scenario.
+
+        ``on_created`` is an optional server-side hook, called with
+        ``(session, cause_event_id)`` after the session is seeded and before
+        it is persisted. It exists for exactly one caller --
+        :meth:`rewindsec.management.service.ManagementService.start_attempt`,
+        which stamps the session with the assessment attempt it *is*, so the
+        link survives in the session's own state rather than only in a side
+        table. It is not reachable from any route: no request can supply it,
+        and it is not part of the learner API's vocabulary. A hook that draws
+        randomness, advances the clock or schedules an event would perturb the
+        session's deterministic future; the one hook that exists writes a
+        single world value and does none of those things.
+
+        ``attempt_bound`` is the caller stating, on the server, that a
+        persistent Assessment Attempt already exists for the session it is
+        asking for. Assessment mode is refused without it.
+
+        This is defence in depth, not the product rule: both assigned and
+        self-directed HTTP flows delegate Assessment creation to the
+        management service. It is here as well because this method is the
+        *only* place a :class:`~rewindsec.domain.session.SimulationSession` is
+        constructed, which makes it the only place the invariant
+
+            Assessment mode => Assessment Attempt => TrainingSession
+
+        can be held for every caller rather than for every caller somebody
+        remembered. A future route, script or migration that creates a session
+        cannot produce an orphan Assessment session by forgetting a check in a
+        different file. Only the management service passes it, from its common
+        bound-attempt creator, which has already written the Attempt row before
+        it gets here.
         """
         focus = _coerce(focus, Focus, "focus")
         mode = _coerce(mode, Mode, "mode")
+        if mode is Mode.ASSESSMENT and not attempt_bound:
+            raise ForbiddenActionError(
+                "An assessment session must be created from an assessment "
+                "attempt.")
         session_id = self._new_session_id()
         session = SimulationSession.create(
             session_id=session_id, learner_ref=learner_ref, focus=focus,
@@ -186,6 +230,8 @@ class WorkstationService(object):
         # call existed carries no stamp and is legacy for scoring purposes for
         # its entire lifetime -- see ``rewindsec.scoring.state``.
         scoring_state.bootstrap(session, cause_event_id=start_event.event_id)
+        if on_created is not None:
+            on_created(session, cause_event_id=start_event.event_id)
         self._repository.create(session)
         return session_id
 
@@ -493,8 +539,50 @@ class WorkstationService(object):
             raise InvalidRequestError(
                 "That action could not be applied.") from exc
 
+        # Applied, so this action may have resolved the interaction that
+        # satisfies the assessment. Checked here rather than in any caller:
+        # an action is the only thing that can resolve an opportunity, and
+        # this is the only place an action is applied.
+        self._close_assessment_boundary_if_due(
+            session, closed_by_action_id=learner_action.action_id)
         self._save(session, loaded_revision)
         return ActionResult(self._project(session), notice)
+
+    def _close_assessment_boundary_if_due(self, session,
+                                          closed_by_action_id=None):
+        """Close the assessment boundary once the requirement is satisfied.
+
+        Applies to assessment *attempts* only -- a session with no attempt
+        stamp has no ``required_interactions`` and returns immediately, so a
+        Practice or Simulation run does exactly what it did before.
+
+        Reaching the boundary stops new primary activity arriving and nothing
+        else: the clock keeps running, already-scheduled consequences of the
+        learner's own earlier decisions still fire, and Batch 4 still scores
+        the session as it finds it. See
+        :func:`rewindsec.management.session_link.close_boundary` for why the
+        line is drawn there and not at the Nth resolution exactly.
+
+        The count and exact admitted pairs come from
+        :func:`rewindsec.scoring.evidence.resolve_opportunities` -- there is
+        one implementation of "was this occurrence resolved" in the system
+        and this is not a second one. Writing the boundary record draws no
+        randomness, schedules nothing and advances no clock.
+        """
+        required = session_link.required_interactions(session)
+        if required is None or session_link.boundary_reached(session):
+            return
+        resolutions, _tracked, _decisions = resolve_opportunities(session)
+        completed = [resolution for resolution in resolutions
+                     if resolution.resolved]
+        if len(completed) >= required:
+            admitted = [{
+                "opportunity_id": resolution.opportunity.opportunity_id,
+                "decision_record_id": resolution.record_id,
+            } for resolution in completed[:required]]
+            session_link.close_boundary(
+                session, admitted,
+                closed_by_action_id=closed_by_action_id)
 
     def _save_if_moved(self, session, expected_revision, before_ms):
         """Persist when anything changed -- including when only the clock did.

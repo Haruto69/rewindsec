@@ -1,19 +1,19 @@
 {% extends "prototype/trainer_base.html" %}
-{% block tr_title %}{{ detail.group.name }}{% endblock %}
+{% block tr_title %}{{ view.group.name }}{% endblock %}
 
 {% block tr_content %}
 <nav class="pw-crumbs" aria-label="Breadcrumb">
   <a href="{{ url_for('prototype.trainer_groups') }}">Groups</a>
   <span aria-hidden="true">/</span>
-  <span>{{ detail.group.name }}</span>
+  <span>{{ view.group.name }}</span>
 </nav>
 
 <div class="pw-tr-head">
   <div class="pw-tr-head-main">
-    <h1>{{ detail.group.name }}</h1>
-    <p>Created {{ detail.group.created }} ·
-    {{ detail.members|length }} members ·
-    {{ detail.assessments|length }} assessment{{ '' if detail.assessments|length == 1 else 's' }}.</p>
+    <h1>{{ view.group.name }}</h1>
+    <p>{% if view.group.created_at %}Created {{ view.group.created_at }} · {% endif %}
+    {{ view.members|length }} members ·
+    {{ view.assessments|length }} assessment{{ '' if view.assessments|length == 1 else 's' }}.</p>
   </div>
 </div>
 
@@ -21,43 +21,67 @@
   <div class="pw-stack">
     <div class="pw-idcard">
       <h2 class="pw-small" style="margin-bottom:.6rem">Assessments carried by this group</h2>
-      {% if detail.assessments %}
-        {% for entry in detail.assessments %}
+      {% if view.assessments %}
+        {% for entry in view.assessments %}
         <div class="pw-prov">
           <span class="pw-prov-main">
             <b>{{ entry.assessment.name }}</b>
             <span>{{ entry.assessment.required_interactions }} scored
-            interactions · {{ entry.assessment.window }}</span>
+            interactions{% if entry.assessment.window_label %} · {{ entry.assessment.window_label }}{% endif %}{% if entry.assignment.created_at %} · assigned {{ entry.assignment.created_at }}{% endif %}</span>
           </span>
           <span class="pw-prov-source is-group">group</span>
         </div>
         {% endfor %}
         <p class="pw-xsmall pw-muted" style="margin-top:.7rem">
-          Every member receives these through the group. A member who is also
-          assigned one of them directly keeps both records.
+          Every current member receives these through the group. A member who
+          is also assigned one of them directly keeps both records, and
+          removing them from this group does not revoke the direct route.
         </p>
       {% else %}
         <p class="pw-small pw-muted">No assessments assigned to this group.</p>
       {% endif %}
     </div>
 
-    {% if detail.overlapping_groups %}
+    {% if view.overlaps %}
     <div class="pw-card">
       <h2 class="pw-small" style="margin-bottom:.5rem">Overlapping groups</h2>
-      {% for overlap in detail.overlapping_groups %}
+      {% for overlap in view.overlaps %}
       <div class="pw-small" style="margin-bottom:.4rem">
-        <a href="{{ url_for('prototype.trainer_group', group_id=overlap.group.id) }}">{{ overlap.group.name }}</a>
+        <a href="{{ url_for('prototype.trainer_group', group_id=overlap.group.group_id) }}">{{ overlap.group.name }}</a>
         <div class="pw-xsmall pw-muted">Also contains {{ overlap.shared|join(', ') }}</div>
       </div>
       {% endfor %}
     </div>
     {% endif %}
+
+    <div class="pw-card" id="pw-membership" data-group-id="{{ view.group.group_id }}">
+      <h2 class="pw-small" style="margin-bottom:.5rem">Add a member</h2>
+      {% if view.candidates %}
+      <div class="pw-field">
+        <label class="pw-label" for="pw-member-student">Student</label>
+        <select class="pw-select" id="pw-member-student">
+          {% for student in view.candidates %}
+          <option value="{{ student.student_id }}">{{ student.display_name }}{% if student.reference %} — {{ student.reference }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="pw-assign-foot" style="margin-top:.6rem">
+        <p class="pw-assign-status" id="pw-member-status" role="status"></p>
+        <button type="button" class="pw-btn is-primary" id="pw-member-add">Add to group</button>
+      </div>
+      {% else %}
+      <p class="pw-small pw-muted">Every student is already a member.</p>
+      {% endif %}
+    </div>
   </div>
 
   <section>
     <div class="pw-section-head" style="margin-bottom:.6rem">
       <h2>Members</h2>
+      <p>Removing a member ends their membership only. Assignments and
+      attempts already made keep the provenance they were created with.</p>
     </div>
+    {% if view.members %}
     <div class="pw-tablewrap">
       <table class="pw-table">
         <thead>
@@ -66,41 +90,56 @@
             <th scope="col">Cohort</th>
             <th scope="col">Other groups</th>
             <th scope="col">Status</th>
+            <th scope="col"><span class="pw-visually-hidden">Membership</span></th>
           </tr>
         </thead>
         <tbody>
-          {% for member in detail.members %}
+          {% for row in view.members %}
           <tr>
             <td>
               <span class="pw-row" style="gap:.55rem;flex-wrap:nowrap">
-                <span class="pw-avatar is-neutral" aria-hidden="true">{{ member.initials }}</span>
+                <span class="pw-avatar is-neutral" aria-hidden="true">{{ row.student.initials }}</span>
                 <span>
-                  <a href="{{ url_for('prototype.trainer_student', student_id=member.id) }}">{{ member.name }}</a>
-                  <div class="pw-xsmall pw-muted">{{ member.ref }}</div>
+                  <a href="{{ url_for('prototype.trainer_student', student_id=row.student.student_id) }}">{{ row.student.display_name }}</a>
+                  <div class="pw-xsmall pw-muted">{{ row.student.reference or row.student.student_id }}</div>
                 </span>
               </span>
             </td>
-            <td>{{ member.cohort }}</td>
+            <td>{{ row.student.cohort or '—' }}</td>
             <td class="pw-xsmall">
-              {% set others = [] %}
-              {% for group in snapshot.groups %}
-                {% if group.id != detail.group.id and member.id in group.members %}
-                  <div><a href="{{ url_for('prototype.trainer_group', group_id=group.id) }}">{{ group.name }}</a></div>
-                {% endif %}
-              {% endfor %}
+              {% if row.other_groups %}
+                {% for group in row.other_groups %}
+                <div><a href="{{ url_for('prototype.trainer_group', group_id=group.group_id) }}">{{ group.name }}</a></div>
+                {% endfor %}
+              {% else %}<span class="pw-muted">None</span>{% endif %}
             </td>
             <td>
-              {% if member.status == 'active' %}
+              {% if row.student.status == 'active' %}
                 <span class="pw-chip is-good">Active</span>
               {% else %}
-                <span class="pw-chip">{{ member.status|capitalize }}</span>
+                <span class="pw-chip">{{ row.student.status|capitalize }}</span>
               {% endif %}
+            </td>
+            <td>
+              <button type="button" class="pw-btn pw-member-remove"
+                      data-student-id="{{ row.student.student_id }}">Remove</button>
             </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
+    {% else %}
+    <div class="pw-card pw-empty">
+      <h3>No members yet</h3>
+      <p>Add one on the left. An empty group is still a valid assignment
+      target; whatever it carries reaches members added later.</p>
+    </div>
+    {% endif %}
   </section>
 </div>
+{% endblock %}
+
+{% block tr_scripts %}
+<script src="{{ url_for('static', filename='prototype/trainer.js') }}" defer></script>
 {% endblock %}

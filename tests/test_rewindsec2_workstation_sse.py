@@ -255,7 +255,11 @@ def test_the_stream_is_the_same_in_an_assessment_attempt(client):
     if it lived in the stream instead there would be two filters to keep in
     step and one of them would eventually drift.
     """
-    snapshot = start(client, focus="phishing", mode="assessment")
+    # The transport is mode-independent, which is the point of the test, so
+    # it is asserted on a session this route may actually create. An
+    # Assessment session is only ever created from an Attempt, and the stream
+    # it gets is this same one -- there is one implementation.
+    snapshot = start(client, focus="phishing", mode="simulation")
     frame = parse_frame(first_frame(client.get(EVENTS)))
     assert set(json.loads(frame["data"])) == {"revision"}
     assert int(frame["id"]) == snapshot["session"]["revision"]

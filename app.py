@@ -982,15 +982,23 @@ app.register_blueprint(create_study_blueprint(
 # consequences are scheduled on the session's own deterministic scheduler, and
 # the browser renders a learner-safe projection it cannot forge.
 #
-# What is still fixture-backed, deliberately, is the trainer console and the
-# numeric part of the results screen. Those are Batches 5 and 4.
+# Batch 5 added the management layer behind the trainer console: persistent
+# students, groups and many-to-many membership, assessment definitions,
+# assignments that keep their provenance, and assessment attempts linked to
+# real sessions and to the Batch 4 finalized score. The trainer surfaces are
+# gated by the application's own instructor authentication, injected below --
+# never inferred from the ``/trainer`` URL prefix.
 #
 # The wiring below is the whole attachment surface: this block,
-# ``rewindsec/prototype/``, ``rewindsec/workstation/``, ``templates/prototype/``
-# and ``static/prototype/``. The three 2.0 tables are created alongside the
-# application's own in ``init_db`` and share the same database; they are
-# separately named (``rewindsec2_*``) so no query can mix 2.0 rows with v1 ones.
+# ``rewindsec/prototype/``, ``rewindsec/workstation/``, ``rewindsec/management/``,
+# ``templates/prototype/`` and ``static/prototype/``. The ten 2.0 tables are
+# created alongside the application's own in ``init_db`` and share the same
+# database; they are separately named (``rewindsec2_*``) so no query can mix
+# 2.0 rows with v1 ones.
 
+from rewindsec.management.service import ManagementService  # noqa: E402
+from rewindsec.persistence.management_adapter import (  # noqa: E402
+    SqlAlchemyManagementRepository)
 from rewindsec.persistence.sqlalchemy_adapter import (  # noqa: E402
     SqlAlchemySessionRepository)
 from rewindsec.prototype.routes import create_prototype_blueprint  # noqa: E402
@@ -1034,8 +1042,50 @@ def workstation_service():
     return service
 
 
+def management_repository():
+    """The RewindSec 2.0 management repository, over the application's engine.
+
+    Same arrangement as ``workstation_repository``: the adapter is handed an
+    Engine and nothing else, so it stays Flask-free and directly testable, and
+    it reuses the connection pool Flask-SQLAlchemy already manages rather than
+    opening a second one.
+    """
+    repository = getattr(app, "_rewindsec2_management_repository", None)
+    if repository is None:
+        repository = SqlAlchemyManagementRepository(db.engine)
+        app._rewindsec2_management_repository = repository
+    return repository
+
+
+def management_service():
+    """The configured ManagementService for this app. One per process.
+
+    Stateless between requests -- every record it works with is in the
+    database -- so this cache is about not rebuilding an object graph, nothing
+    more. It is handed the *same* session repository the workstation uses, as
+    both the aggregate repository and the read-only session directory, so a
+    trainer listing can never read from a different store than the learner
+    wrote to.
+    """
+    service = getattr(app, "_rewindsec2_management_service", None)
+    if service is None:
+        sessions = workstation_repository()
+        service = ManagementService(
+            repository=management_repository(), sessions=sessions,
+            directory=sessions, workstation=workstation_service())
+        app._rewindsec2_management_service = service
+    return service
+
+
 app.register_blueprint(create_prototype_blueprint(
-    service_factory=workstation_service, updates=WORKSTATION_UPDATES))
+    service_factory=workstation_service, updates=WORKSTATION_UPDATES,
+    management_factory=management_service,
+    # The application's real instructor authentication (see ``security.py``:
+    # a password held in the environment, login throttling, session rotation),
+    # applied to every trainer page and every trainer API route. The trainer
+    # console has no authorization mechanism of its own, and none is created
+    # for it here.
+    require_trainer=require_instructor))
 
 
 def record_event(event_type, scenario_id=None, source=None, target=None,
@@ -1266,6 +1316,12 @@ def init_db(force_reseed=False):
     # a single historical table and without requiring anyone to delete
     # simulator.db.
     workstation_repository().create_schema()
+    # The Batch 5 management tables, likewise on their own MetaData and
+    # likewise ``checkfirst``. Adding them to a database that already holds
+    # Batch 1-4 session, event and action rows creates seven new tables and
+    # alters none of the existing ones -- no stored session is rewritten, and
+    # nobody has to delete simulator.db.
+    management_repository().create_schema()
 
     already_seeded = bool(Product.query.first()) and bool(DemoFile.query.first())
     if already_seeded and not force_reseed:

@@ -5,26 +5,72 @@
 <div class="pw-tr-head">
   <div class="pw-tr-head-main">
     <h1>Overview</h1>
-    <p>Records and results for the {{ snapshot.trainer.organization }}
-    programme. Every figure on this page is prototype demonstration data.</p>
+    <p>Records and results for this deployment. Every figure on this page is
+    derived from persisted RewindSec 2.0 sessions; where stored data cannot
+    support a figure, it is shown as unavailable rather than estimated.</p>
   </div>
 </div>
 
 <div class="pw-grid is-4">
-  {% for metric in snapshot.dashboard_metrics %}
+  {% for card in view.cards %}
   <div class="pw-metric">
-    <div class="pw-metric-label">{{ metric.label }}</div>
-    <div class="pw-metric-value">{{ metric.value }}</div>
-    <div class="pw-metric-sub">{{ metric.sub }}</div>
+    <div class="pw-metric-label">{{ card.label }}</div>
+    <div class="pw-metric-value">{{ card.value }}</div>
+    <div class="pw-metric-sub">{{ card.sub }}</div>
   </div>
   {% endfor %}
 </div>
 
+{% if view.outstanding %}
+<section class="pw-section">
+  <div class="pw-section-head">
+    <h2>Attempts outstanding</h2>
+    <p>Assessment attempts that have been started and not yet finished.
+    Progress counts scored interactions, not events or elapsed time.</p>
+  </div>
+  <div class="pw-tablewrap">
+    <table class="pw-table">
+      <thead>
+        <tr>
+          <th scope="col">Student</th>
+          <th scope="col">Assessment</th>
+          <th scope="col">Attempt</th>
+          <th scope="col">Started</th>
+          <th scope="col">Scored interactions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in view.outstanding %}
+        <tr>
+          <td><a href="{{ url_for('prototype.trainer_student', student_id=row.student_id) }}">{{ row.student_name }}</a></td>
+          <td>{{ row.assessment_name }}</td>
+          <td class="is-num">#{{ row.attempt_number }}</td>
+          <td class="pw-xsmall">{{ row.started or '—' }}</td>
+          <td class="is-num">
+            {% if row.progress %}
+              {{ row.progress.completed }} / {{ row.progress.required }}
+              <div class="pw-xsmall pw-muted">{{ row.progress.presented }} presented</div>
+            {% else %}<span class="pw-muted">—</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
 <section class="pw-section">
   <div class="pw-section-head">
     <h2>Recent sessions</h2>
-    <p>Focus and mode are the learner's choices; the profile is derived.</p>
+    <p>Focus and mode are the learner's own choices for a self-directed run
+    and the assessment's for an attempt; the scaffolding profile is derived
+    from the mode and is not settable here.
+    {% if view.session_total > view.sessions|length %}
+    Showing the {{ view.sessions|length }} most recent of
+    {{ view.session_total }}.{% endif %}</p>
   </div>
+  {% if view.sessions %}
   <div class="pw-tablewrap">
     <table class="pw-table">
       <thead>
@@ -36,76 +82,94 @@
           <th scope="col">Derived profile</th>
           <th scope="col">Status</th>
           <th scope="col">Score</th>
-          <th scope="col">Notable</th>
         </tr>
       </thead>
       <tbody>
-        {% for session in sessions %}
-        {% set student = snapshot.index.students_by_id[session.student_id] %}
+        {% for row in view.sessions %}
         <tr>
           <td>
-            <a href="{{ url_for('prototype.trainer_student', student_id=student.id) }}">{{ student.name }}</a>
-            <div class="pw-xsmall pw-muted">{{ student.ref }}</div>
+            <a href="{{ url_for('prototype.trainer_student', student_id=row.student_id) }}">{{ row.student_name }}</a>
+            {% if row.student_reference %}
+            <div class="pw-xsmall pw-muted">{{ row.student_reference }}</div>
+            {% endif %}
           </td>
-          <td class="is-num">{{ session.started }}<div class="pw-xsmall pw-muted">{{ session.duration }}</div></td>
-          <td><span class="pw-chip is-plain">{{ session.focus|capitalize }}</span></td>
+          <td class="is-num pw-xsmall">{{ row.started or '—' }}</td>
+          <td><span class="pw-chip is-plain">{{ row.focus|capitalize }}</span></td>
           <td>
-            <span class="pw-chip is-plain">{{ session.mode|capitalize }}</span>
-            {% if session.assessment_id %}
+            <span class="pw-chip is-plain">{{ row.mode|capitalize }}</span>
+            {% if row.assessment_name %}
             <div class="pw-xsmall pw-muted" style="margin-top:.2rem">
-              {{ snapshot.index.assessments_by_id[session.assessment_id].name }}
+              {{ row.assessment_name }} · attempt #{{ row.attempt_number }}
             </div>
             {% endif %}
           </td>
-          <td class="pw-xsmall pw-muted">{{ session.profile }}</td>
+          <td class="pw-xsmall pw-muted">{{ row.profile or '—' }}</td>
           <td>
-            {% if session.status == 'complete' %}
+            {% if not row.readable %}
+              <span class="pw-chip is-caution">Unreadable</span>
+            {% elif row.status == 'completed' %}
               <span class="pw-chip is-good">Complete</span>
-            {% elif session.status == 'in_progress' %}
+            {% elif row.status == 'active' %}
               <span class="pw-chip is-accent">In progress</span>
             {% else %}
               <span class="pw-chip is-caution">Abandoned</span>
             {% endif %}
           </td>
           <td class="is-num">
-            {% if session.score is not none %}
-              <span class="pw-strong">{{ session.score }}</span>
-              <div class="pw-meter {% if session.score < 55 %}is-low{% elif session.score < 75 %}is-mid{% else %}is-high{% endif %}"
+            {% if row.score is not none %}
+              <span class="pw-strong">{{ row.score }}</span>
+              <div class="pw-meter {% if row.score < 55 %}is-low{% elif row.score < 75 %}is-mid{% else %}is-high{% endif %}"
                    style="width:56px;margin-top:.25rem">
-                <span style="width:{{ session.score }}%"></span>
+                <span style="width:{{ row.score }}%"></span>
               </div>
             {% else %}
               <span class="pw-muted">—</span>
             {% endif %}
-          </td>
-          <td class="pw-xsmall">
-            {% for note in session.highlights %}<div>{{ note }}</div>{% endfor %}
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  {% else %}
+  <div class="pw-card pw-empty">
+    <h3>No sessions recorded yet</h3>
+    <p>Session history appears here as learners run training. Nothing is
+    shown until there is something stored to show.</p>
+  </div>
+  {% endif %}
 </section>
 
 <section class="pw-section">
   <div class="pw-section-head">
     <h2>Cohort metrics</h2>
     <p>Versioned metric records rather than columns bolted onto the session
-    model, so new measures can be added without a schema change.</p>
+    model, so a new measure can be added without a schema change. Each card
+    states its own denominator.</p>
   </div>
   <div class="pw-grid is-3">
-    {% for metric in snapshot.cohort_metrics %}
+    {% for metric in view.metrics %}
     <div class="pw-card">
       <div class="pw-row is-between" style="align-items:baseline">
         <b class="pw-small">{{ metric.label }}</b>
-        <span class="pw-chip">{{ metric.version }}</span>
+        <span class="pw-chip">{{ metric.metric_version }}</span>
       </div>
-      <div class="pw-metric-value" style="font-size:1.5rem">{{ metric.value }}</div>
-      <p class="pw-xsmall pw-muted" style="margin-top:.2rem">{{ metric.note }}</p>
+      <div class="pw-metric-value" style="font-size:1.5rem">{{ metric.display }}</div>
+      {% if metric.available %}
+      <p class="pw-xsmall pw-muted" style="margin-top:.2rem">
+        {{ metric.numerator }} of {{ metric.denominator }} —
+        {{ metric.denominator_label }}
+      </p>
+      {% else %}
+      <p class="pw-xsmall pw-muted" style="margin-top:.2rem">
+        Unavailable — {{ metric.unavailable_reason }}
+      </p>
+      {% endif %}
+      <p class="pw-xsmall pw-muted" style="margin-top:.35rem">{{ metric.definition }}</p>
     </div>
     {% endfor %}
   </div>
+  <p class="pw-xsmall pw-muted" style="margin-top:.8rem">{{ view.interpretation }}</p>
 </section>
 
 <section class="pw-section">

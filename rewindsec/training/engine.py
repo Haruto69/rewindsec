@@ -47,6 +47,9 @@ from rewindsec.training import delivery, eligibility, policy, selection
 from rewindsec.training import state as engine_state
 from rewindsec.training.catalog import all_candidates, by_id
 from rewindsec.workstation.bootstrap import NS_SESSION
+# Leaf module: imports nothing, so reading the assessment boundary here
+# cannot create a cycle between the engine and the management package.
+from rewindsec.management import session_link
 
 __all__ = ["EVALUATION_EVENT_TYPE", "ARRIVAL_EVENT_TYPE", "start",
            "schedule_next_evaluation", "evaluate", "force_candidate",
@@ -155,6 +158,20 @@ def evaluate(session, event):
     # is lost. What stops is the arrival of *new, unrelated* primary activity.
     if session.world.get(NS_SESSION, "pending_comparison"):
         record["reason"] = "blocked_by_comparison"
+        return _finish(session, event, record, step)
+
+    # An assessment attempt that has already satisfied its required scored
+    # interactions is past its boundary. Same shape as the pause above, and
+    # for a related reason: the world is not stopped -- consequences already
+    # in flight still fire and the learner can still act on what is in front
+    # of them -- but the environment stops handing out *new, unrelated*
+    # scored opportunities. Without this an attempt could accumulate an
+    # arbitrary number of extra interactions purely by being left open, and
+    # two attempts at the same assessment would stop being comparable.
+    # Non-attempt sessions never carry a boundary, so nothing changes for
+    # Practice or Simulation.
+    if session_link.boundary_reached(session):
+        record["reason"] = "assessment_boundary_reached"
         return _finish(session, event, record, step)
 
     active_primary = meta.get("active_primary")

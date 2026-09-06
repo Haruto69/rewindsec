@@ -10,41 +10,48 @@
   </div>
 </div>
 
+{% if view.rows %}
 <div class="pw-grid is-3">
-  {% for row in rows %}
+  {% for row in view.rows %}
   <section class="pw-card">
     <div class="pw-row is-between" style="align-items:baseline">
       <h2 style="font-size:1rem">
-        <a href="{{ url_for('prototype.trainer_group', group_id=row.group.id) }}"
+        <a href="{{ url_for('prototype.trainer_group', group_id=row.group.group_id) }}"
            style="text-decoration:none">{{ row.group.name }}</a>
       </h2>
       <span class="pw-chip">{{ row.members|length }} members</span>
     </div>
-    <p class="pw-xsmall pw-muted" style="margin-top:.2rem">Created {{ row.group.created }}</p>
+    {% if row.group.created_at %}
+    <p class="pw-xsmall pw-muted" style="margin-top:.2rem">Created {{ row.group.created_at }}</p>
+    {% endif %}
 
+    {% if row.members %}
     <div class="pw-row" style="gap:.3rem;margin-top:.75rem">
       {% for member in row.members %}
-      <span class="pw-avatar is-neutral" title="{{ member.name }}"
-            aria-label="{{ member.name }}">{{ member.initials }}</span>
+      <span class="pw-avatar is-neutral" title="{{ member.display_name }}"
+            aria-label="{{ member.display_name }}">{{ member.initials }}</span>
       {% endfor %}
     </div>
+    {% else %}
+    <p class="pw-xsmall pw-muted" style="margin-top:.75rem">No members yet.</p>
+    {% endif %}
 
     <hr class="pw-divider" style="margin:.9rem 0">
 
     <p class="pw-kicker">Assessments</p>
     {% if row.assessments %}
-      {% for entry in row.assessments %}
-      <div class="pw-small">{{ entry.assessment.name }}
-        <span class="pw-muted">· {{ entry.assessment.required_interactions }} scored interactions</span>
+      {% for assessment in row.assessments %}
+      <div class="pw-small">{{ assessment.name }}
+        <span class="pw-muted">· {{ assessment.required_interactions }} scored interactions</span>
       </div>
       {% endfor %}
     {% else %}
       <p class="pw-small pw-muted">None assigned to this group.</p>
     {% endif %}
 
-    {% if row.overlapping_groups %}
+    {% if row.overlaps %}
     <p class="pw-kicker" style="margin-top:.9rem">Shares members with</p>
-    {% for overlap in row.overlapping_groups %}
+    {% for overlap in row.overlaps %}
     <div class="pw-xsmall pw-muted">
       {{ overlap.group.name }} — {{ overlap.shared|join(', ') }}
     </div>
@@ -53,4 +60,42 @@
   </section>
   {% endfor %}
 </div>
+{% else %}
+<div class="pw-card pw-empty">
+  <h3>No groups yet</h3>
+  <p>Create one below. Groups are how an assessment reaches more than one
+  learner while keeping a route that can be traced back.</p>
+</div>
+{% endif %}
+
+<section class="pw-section">
+  <div class="pw-section-head">
+    <h2>Create a group</h2>
+    <p>Membership is added on the group's own page. A group with no members
+    is a valid assignment target — members added later receive whatever the
+    group carries.</p>
+  </div>
+  <div class="pw-assign">
+    <div class="pw-assign-grid">
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-group-name">Name</label>
+        <input class="pw-input" id="pw-new-group-name" type="text"
+               autocomplete="off" maxlength="120">
+      </div>
+      <div class="pw-field">
+        <label class="pw-label" for="pw-new-group-desc">Description (optional)</label>
+        <input class="pw-input" id="pw-new-group-desc" type="text"
+               autocomplete="off" maxlength="400">
+      </div>
+    </div>
+    <div class="pw-assign-foot">
+      <p class="pw-assign-status" id="pw-new-group-status" role="status"></p>
+      <button type="button" class="pw-btn is-primary" id="pw-new-group-btn">Create group</button>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block tr_scripts %}
+<script src="{{ url_for('static', filename='prototype/trainer.js') }}" defer></script>
 {% endblock %}

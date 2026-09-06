@@ -143,7 +143,7 @@ def test_starting_while_a_session_is_live_is_refused(client, flask_app, worked):
     before = state(flask_app, worked)
     response = client.post(START, headers=headers(client),
                            data=json.dumps({"focus": "bec",
-                                            "mode": "assessment"}))
+                                            "mode": "simulation"}))
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == "session_active"
     assert cookie_session_id(client) == worked

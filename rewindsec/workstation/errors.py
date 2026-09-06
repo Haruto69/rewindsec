@@ -21,6 +21,7 @@ __all__ = [
     "NoActiveSessionError",
     "SessionEndedError",
     "SessionAlreadyActiveError",
+    "AssessmentRefusedError",
     "StaleRevisionConflict",
     "InternalWorkstationError",
 ]
@@ -116,6 +117,24 @@ class SessionAlreadyActiveError(WorkstationError):
     """
 
     code = "session_active"
+    status = 409
+
+
+class AssessmentRefusedError(WorkstationError):
+    """An assessment attempt was refused for a stated administrative reason.
+
+    Batch 5. Covers "you have not been assigned this", "this assessment is not
+    open" and "you have used every attempt allowed" -- all of which are facts
+    about the learner's own record, not about the scenario, so stating them
+    plainly reveals nothing. ``detail`` carries the retry policy and the
+    attempt counts where they apply, so the client can say *how many* attempts
+    remain rather than only that there are none.
+
+    409 rather than 403: the learner is a legitimate caller and the refusal is
+    about the current state of their record, which can change.
+    """
+
+    code = "assessment_refused"
     status = 409
 
 

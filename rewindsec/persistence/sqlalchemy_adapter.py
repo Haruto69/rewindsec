@@ -38,7 +38,8 @@ from sqlalchemy.exc import IntegrityError
 
 from rewindsec.domain.session import SimulationSession
 from rewindsec.persistence.ports import (RepositoryError, SessionAlreadyExistsError,
-                                         SessionNotFoundError, SessionRepository,
+                                         SessionDirectory, SessionNotFoundError,
+                                         SessionRepository, SessionSummary,
                                          StaleRevisionError)
 
 __all__ = [
@@ -107,7 +108,7 @@ def _dumps(state):
                       separators=(",", ":"), allow_nan=False)
 
 
-class SqlAlchemySessionRepository(SessionRepository):
+class SqlAlchemySessionRepository(SessionRepository, SessionDirectory):
     """A :class:`~rewindsec.persistence.ports.SessionRepository` over SQLAlchemy.
 
     Construct with any :class:`~sqlalchemy.engine.Engine` -- a real
@@ -219,6 +220,35 @@ class SqlAlchemySessionRepository(SessionRepository):
                 .where(sessions_table.c.session_id == session_id)
             ).first()
         return found is not None
+
+    # -- directory (read-only listing; see ports.SessionDirectory) ---------
+
+    def list_summaries(self, learner_refs=None):
+        """Lifecycle columns for stored sessions. Loads no snapshot.
+
+        Reads only the columns ``rewindsec2_sessions`` already carries, so a
+        listing never has to parse -- or be able to parse -- a stored
+        snapshot. That matters for the trainer console: one unreadable
+        historical session must not take the whole roster down with it.
+        """
+        query = sa.select(sessions_table.c.session_id,
+                          sessions_table.c.learner_ref, sessions_table.c.focus,
+                          sessions_table.c.mode, sessions_table.c.status,
+                          sessions_table.c.revision)
+        if learner_refs is not None:
+            refs = sorted({ref for ref in learner_refs if ref})
+            if not refs:
+                return ()
+            query = query.where(sessions_table.c.learner_ref.in_(refs))
+        query = query.order_by(sessions_table.c.session_id)
+        with self._engine.begin() as conn:
+            rows = conn.execute(query).mappings().all()
+        return tuple(
+            SessionSummary(session_id=row["session_id"],
+                           learner_ref=row["learner_ref"], focus=row["focus"],
+                           mode=row["mode"], status=row["status"],
+                           revision=row["revision"])
+            for row in rows)
 
     # -- row construction ------------------------------------------------
 

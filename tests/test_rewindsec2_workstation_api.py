@@ -293,13 +293,15 @@ def test_a_duplicated_consequential_submission_applies_once(client, flask_app):
 # ===========================================================================
 
 def test_two_browsers_get_two_independent_sessions(client, other_client):
+    # Both self-directed: Assessment mode is not something a browser may ask
+    # this route for at all -- see the refusal test below.
     a = start(client, focus="phishing", mode="practice")
-    b = start(other_client, focus="bec", mode="assessment")
+    b = start(other_client, focus="bec", mode="simulation")
 
     assert a["session"]["focus"] == "phishing"
     assert b["session"]["focus"] == "bec"
     assert snapshot(client)["session"]["mode"] == "practice"
-    assert snapshot(other_client)["session"]["mode"] == "assessment"
+    assert snapshot(other_client)["session"]["mode"] == "simulation"
 
 
 def test_one_browser_cannot_act_inside_another_browsers_session(
@@ -499,3 +501,79 @@ def test_the_client_cannot_choose_how_far_time_moves(client):
     # all: whatever is in it, the server measures the step itself.
     assert response.status_code == 200
     assert response.get_json()["snapshot"]["session"]["sim_time_ms"] < 10 ** 6
+
+
+# ===========================================================================
+# Self-directed Assessment is Attempt-backed (Batch 5 final correction)
+# ===========================================================================
+
+
+def test_the_generic_start_route_creates_a_self_directed_attempt(client,
+                                                                  flask_app):
+    response = client.post(START, headers=headers(client),
+                           data=json.dumps({"focus": "bec",
+                                            "mode": "assessment"}))
+    assert response.status_code == 201, response.data
+    payload = response.get_json()
+    assert payload["snapshot"]["session"]["mode"] == "assessment"
+    assert payload["snapshot"]["session"]["focus"] == "bec"
+    assert payload["attempt"]["provenance_type"] == "self_directed"
+    assert payload["attempt"]["assignment_id"] is None
+    assert payload["attempt"]["assignment_group_id"] is None
+
+    import app as app_module
+    with flask_app.app_context():
+        attempt = app_module.management_service().attempt_for_session(
+            session_id_of(client, flask_app))
+        assert attempt is not None
+        definition = app_module.management_service().get_assessment(
+            attempt.assessment_id)
+        assert definition.is_self_directed_policy
+        assert app_module.management_service().repository.list_assignments(
+            assessment_id=definition.assessment_id) == ()
+
+
+def test_self_directed_assessment_resume_reuses_attempt(client, flask_app):
+    first = client.post(START, headers=headers(client),
+                        data=json.dumps({"focus": "mfa",
+                                         "mode": "assessment"}))
+    assert first.status_code == 201
+    first_payload = first.get_json()
+
+    from rewindsec.prototype.api import SESSION_KEY
+    with client.session_transaction() as flask_session:
+        del flask_session[SESSION_KEY]
+
+    resumed = client.post(START, headers=headers(client),
+                          data=json.dumps({"focus": "mfa",
+                                           "mode": "assessment"}))
+    assert resumed.status_code == 200
+    assert resumed.get_json()["resumed"] is True
+    assert (resumed.get_json()["attempt"]["attempt_id"]
+            == first_payload["attempt"]["attempt_id"])
+    assert resumed.get_json()["attempt"]["session_id"] \
+        == first_payload["attempt"]["session_id"]
+
+
+def test_self_directed_assessment_remains_private_between_learners(
+        client, other_client, flask_app):
+    from rewindsec.prototype.api import SESSION_KEY
+
+    start(client, focus="phishing", mode="assessment")
+    victim = session_id_of(client, flask_app)
+    start(other_client, focus="phishing", mode="assessment")
+    with other_client.session_transaction() as flask_session:
+        flask_session[SESSION_KEY] = victim
+    response = other_client.get(SESSION, headers={"Accept": "application/json"})
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "no_session"
+
+
+def test_all_three_architecture_modes_are_self_directed_choices(client):
+    from rewindsec.prototype.api import SELF_DIRECTED_MODES
+
+    assert set(SELF_DIRECTED_MODES) == {"practice", "simulation", "assessment"}
+    for mode in SELF_DIRECTED_MODES:
+        browser = client.application.test_client()
+        assert start(browser, focus="mixed", mode=mode)["session"]["mode"] \
+            == mode
