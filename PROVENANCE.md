@@ -310,6 +310,122 @@ alongside the application's own in `init_db()` with `checkfirst`, so they are
 added to an existing database without touching a single historical table. No
 v1 table is read, written or migrated.
 
+### Batch 3: training engine and threat families
+
+**Base commit:** `e69448d` (*Wire workstation to server-authoritative sessions*).
+**Engine version:** `training-engine/v1`. **Catalogue version:**
+`training-catalog/v1`.
+
+`rewindsec/training/` is the layer that decides what the simulated workplace
+does next. It is the batch in which the fixed authored timeline stopped being
+the runtime truth: a session created from here on selects its own workplace
+activity from world state, the Context Ledger, per-family pressure and named
+seeded RNG streams, and the authored `TIMELINES` table is consulted only for
+sessions that predate this batch.
+
+| Path | Role |
+|---|---|
+| `rewindsec/training/policy.py` | Every authored constant, and the occurrence rule written out in full: pressure increment, focus and mode multipliers, starvation, cooldown, hazard cap, evaluation cadence. Authored system logic, not a published algorithm and not derived from human-learning research. |
+| `rewindsec/training/state.py` | The persisted engine state and the only vocabulary for reading or writing it. Lives in one dedicated `WorldState` namespace (`training_engine`), so it is persisted, restored and audited with the session and is invisible to the projection's namespace allowlist. |
+| `rewindsec/training/eligibility.py` | LOCKED or ELIGIBLE, with machine-readable reason codes, computed before any random value is drawn. Declares `fact_available` and `fact_observed` as separate prerequisite kinds. |
+| `rewindsec/training/candidate.py`, `catalog.py` | The candidate value object and the single sorted catalogue of every activity the engine may select. |
+| `rewindsec/training/families/` | Per-family candidates and network-dependence declarations: `phishing.py`, `ransomware.py`, `mfa.py`, `bec.py`, `background.py`. |
+| `rewindsec/training/selection.py` | Weighted choice over an explicitly ordered sequence, consuming exactly one draw per decision. |
+| `rewindsec/training/delivery.py` | The adapters that turn a selected candidate into world state, through `worldops` and nothing else. |
+| `rewindsec/training/progression.py` | Whether a scheduled consequence step may still happen. Holds the network-dependent step registry and the isolation latch. |
+| `rewindsec/training/engine.py` | The evaluation pulse: eligibility, pressure, occurrence, family, candidate, delivery, reschedule. |
+
+**Threat families implemented:** phishing, ransomware, MFA and BEC, each with
+at least one hostile candidate and at least one structurally identical
+legitimate counterpart, plus a separate benign background family for ordinary
+workplace activity.
+
+**Deterministic selection semantics.** Simulation time is divided into
+evaluation pulses scheduled on the session's own `EventScheduler`. At each
+pulse the engine resolves every candidate to LOCKED or ELIGIBLE with no RNG
+involvement, raises pressure for eligible families by a seeded `+3..+10`
+percentage points scaled by integer focus and mode multipliers plus a bounded
+starvation term, rolls once against the capped sum, then picks a family by
+pressure and a candidate by authored weight. Selection resets that family's
+pressure and starts its cooldown; every other eligible family's starvation
+counter increments; a family with nothing eligible is frozen and its
+starvation reset. Background activity runs the same rule on its own state and
+its own stream, only when no threat fired.
+
+RNG is partitioned into the five named streams architecture §16.1 requires:
+`background`, `threat_selection`, `timing`, `content_variation` and
+`consequence`. The four Batch 1 stream names are unchanged — a stream's seed
+is derived from its name, so renaming one would silently alter every stored
+session — and the new names were added alongside them.
+
+**Network isolation.** The Service Desk disconnect action became meaningful
+containment. It records a `LearnerAction`, flips the authoritative network
+flag, records the simulation time of the first isolation, and latches every
+pending network-dependent consequence step as suppressed with an internal
+event naming chain, step and reason. Suppressed steps still come due and still
+settle their chain; they simply apply no effect, open no incident and record no
+consequence, so the causal graph never points at something that did not
+happen. Containment is stored separately from any notion of recovery: nothing
+is restored, no incident is closed, no file returns and no account is
+un-compromised. Damage already incurred is untouched, and reconnecting — a
+narrow, consequential action added so isolation cannot soft-lock a session —
+does not resurrect a contained consequence. Isolating with nothing to contain
+has an operational cost rather than being free.
+
+**Synthetic content only.** Four new messages and two downloadable page
+resources were authored for this repository. No external corpus, dataset or
+threat feed is ingested, nothing is derived from a real message, every address
+is under a reserved TLD, and no credential, payment detail or employee record
+is real. The dataset provenance and sanitisation pipeline architecture §28
+specifies is Batch 4's.
+
+**Explicitly out of scope, and still fixture-backed or absent:** six-dimension
+scoring, the Evidence Graph and the overall score (Batch 4); the safe
+read-only synthetic document viewer (Batch 4 — the file-open path no longer
+claims one exists); trainer attempt records, students, groups and assessments
+(Batch 5); Docker-backed technical ransomware state (Batch 6 — every effect
+here is a row in a synthetic world, and the training boundary suite asserts
+that the layer imports no `os`, `shutil`, `subprocess`, `socket` or HTTP
+client and calls no `open()`).
+
+**Compatibility with Batch 2 sessions.** A session carries the engine state
+that created it or it does not, and `training.state.engine_is_active` is the
+single predicate that decides. Sessions created before this batch keep the
+authored timeline, never schedule an evaluation pulse, never receive an engine
+candidate, and keep Batch 2's isolation behaviour verbatim. There is
+deliberately no migration and no third case: half an authored queue and half a
+stochastic engine would give a learner two overlapping simulations.
+
+Rules for anything added here:
+
+* **Pure Python engine.** Nothing under `rewindsec/training/` may import
+  Flask, SQLAlchemy, Jinja, `app`, `security`, `sandbox`, any v1 module,
+  anything that could reach a network or a subprocess, or anything that
+  touches the host filesystem.
+* **No ambient nondeterminism, with no exemption.** No `random`, no `secrets`,
+  no `uuid`, no `hash()` in a decision, and no `time`, `datetime` or
+  `calendar` anywhere in the package. Every draw comes from a named stream of
+  the session's `SeededRandom`; every decision reads the session's `SimClock`.
+* **Eligibility before probability.** A LOCKED candidate consumes no draw, so
+  adding a candidate nobody can select cannot shift a stored session's replay.
+* **One dependency direction.** HTTP adapter → workstation → training →
+  domain/core. The domain, the core and the HTTP adapter import nothing from
+  `rewindsec.training`.
+* **Engine state is versioned and namespaced.** It is never written to ad-hoc
+  world keys; changing the selection rule or the catalogue in a way that
+  alters replay requires an intentional version change.
+* **The projection never sees any of it.** Family, candidate id, hostility,
+  pressure, starvation, cooldown, eligibility reasons, suppression latches and
+  the selection trace are all learner-hidden; internal engine introspection is
+  a development-only endpoint, never a field on a learner snapshot.
+
+Tests added: `tests/test_rewindsec2_training_boundaries.py`,
+`test_rewindsec2_training_engine.py`, `test_rewindsec2_training_families.py`,
+`test_rewindsec2_network_isolation.py`, `test_rewindsec2_training_legacy.py`,
+plus `tests/training_helpers.py`. Existing Batch 2 suites that asserted
+fixed-timeline behaviour were replaced with stronger assertions of the new
+architecture rather than relaxed.
+
 ---
 
 ## 7. Quick reference
@@ -322,3 +438,4 @@ v1 table is read, written or migrated.
 | v1 evaluation harnesses and results (§5) | Frozen. Never re-run against 2.0 and reported as continuous. |
 | RewindSec 2.0 (§6) | New names, new tables, new harness, framework-free deterministic core. |
 | RewindSec 2.0 results screen | Timeline, decisions, consequence chains and evidence are real session facts. The six dimension scores are an authored demonstration until Batch 4. |
+| RewindSec 2.0 event selection (§6, Batch 3) | Deterministic authored scheduling policy, versioned `training-engine/v1`. No claim is made that it improves learning, retention, realism or difficulty calibration; those require human evidence. |

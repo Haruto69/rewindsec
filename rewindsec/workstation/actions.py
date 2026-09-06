@@ -53,6 +53,7 @@ MAX_MESSAGE_TEXT = 1000
 MAX_URL = 200
 MAX_FILE_NAME = 120
 MAX_ACCOUNT_REF = 80
+MAX_RESOURCE_REF = 64
 
 #: Identifiers the client may name. Deliberately narrow: these are ids the
 #: server itself minted and handed out in a projection, so anything outside
@@ -124,8 +125,21 @@ ACTION_SPECS = {spec.action_type: spec for spec in (
     _con("browser.release_payment",
          params={"url": ("url", True, MAX_URL),
                  "account": ("str", True, MAX_ACCOUNT_REF)}),
+    #: ``reconnect`` is new in Batch 3 and is deliberately in the same
+    #: allowlist as ``isolate``: putting the machine back on the network is a
+    #: consequential operational decision, not a settings toggle, and it is
+    #: recorded as one. It is narrow on purpose -- there is no network
+    #: management surface here, only the two things a person at a Service Desk
+    #: page can actually do.
     _con("browser.support_action",
-         params={"choice": ("enum", True, ("isolate", "raise"))}),
+         params={"choice": ("enum", True, ("isolate", "raise", "reconnect"))}),
+    #: A download from a synthetic page. The client names the page and the
+    #: *resource id* the projection gave it; it cannot name a filename, a
+    #: path or an address to fetch, and nothing is fetched. The server decides
+    #: what the file is and what it ends up called.
+    _con("browser.download",
+         params={"url": ("url", True, MAX_URL),
+                 "resource": ("str", True, MAX_RESOURCE_REF)}),
 
     # -- Files --------------------------------------------------------------
     _obs("files.inspect", target="file"),

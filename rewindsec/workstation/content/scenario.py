@@ -327,6 +327,31 @@ DECISIONS = {
         "dimensions": ["operational_accuracy"],
         "chain": "chain-task-done",
     },
+
+    # -- Batch 3: containment as a decision with two sides -----------------
+    #
+    # Taking the workstation off the network is the right move with an active
+    # file incident and an expensive one without. Both are recorded, because
+    # "was this containment or was it reflex?" is a question about the world
+    # the learner was in, not about the button they pressed.
+    "d-isolate-no-incident": {
+        "label": "Disconnected the workstation with nothing to contain",
+        "family": None, "class": "over_suspicious",
+        "dimensions": ["operational_accuracy", "incident_response"],
+        "chain": "chain-offline-cost",
+    },
+    "d-network-reconnect": {
+        "label": "Put the workstation back on the network",
+        "family": None, "class": "neutral",
+        "dimensions": ["operational_accuracy"],
+        "chain": None,
+    },
+    "d-ransom-web-download": {
+        "label": "Downloaded the rate card from the billing site",
+        "family": "ransomware", "class": "neutral",
+        "dimensions": [],
+        "chain": None,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -745,6 +770,50 @@ CONSEQUENCE_CHAINS = {
                     {"type": "message", "conversation_id": "conv-marcus-hale",
                      "from": "Marcus Hale",
                      "text": "Perfect, that's the last piece. Thanks."},
+                ],
+            },
+        ],
+    },
+    # The cost of containing nothing. Restrained on purpose: this is not a
+    # network simulator, and the point is only that an isolated workstation
+    # cannot do the work that needs a network. It does not punish, it does not
+    # scold, and it creates no security incident -- there was no incident.
+    "chain-offline-cost": {
+        "id": "chain-offline-cost",
+        "incident_id": None,
+        "title": "Workstation offline",
+        "settles_after": "s-off-2",
+        "steps": [
+            {
+                "id": "s-off-1", "cause": "decision", "delay_ms": 6000,
+                "summary": "Work that needs the network stops.",
+                "effects": [
+                    {"type": "task", "task_id": "task-remote-access",
+                     "state": "interrupted",
+                     "text": "Remote access is unavailable while this "
+                             "workstation is off the network."},
+                    {"type": "notification", "kind": "system",
+                     "title": "This workstation is offline",
+                     "body": "Mail, shared folders and remote access are "
+                             "unavailable until it is reconnected.",
+                     "opens": None},
+                ],
+            },
+            {
+                "id": "s-off-2", "cause": "s-off-1", "delay_ms": 18000,
+                "summary": "A colleague notices the work has stopped.",
+                "effects": [
+                    {"type": "message", "conversation_id": "conv-tom-brennan",
+                     "from": "Tom Brennan",
+                     "text": "Your edits to the shared workbook have stopped "
+                             "coming through. Is your machine off the network? "
+                             "I need the Q3 numbers before the review."},
+                    {"type": "notification", "kind": "message",
+                     "title": "Tom Brennan",
+                     "body": "Your edits to the shared workbook have stopped "
+                             "coming through.",
+                     "opens": {"app": "messages",
+                               "conversation_id": "conv-tom-brennan"}},
                 ],
             },
         ],

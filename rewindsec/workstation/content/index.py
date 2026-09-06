@@ -26,6 +26,7 @@ __all__ = [
     "LOCATION_OF_FILE", "PROMPT_BY_ID", "CONTACT_BY_ID", "CONVERSATION_BY_ID",
     "NOTE_BY_ID", "PAGE_BY_URL", "CHAIN_BY_ID", "DECISION_BY_ID",
     "SAFER_BY_DECISION", "MODE_BY_ID", "TASK_BY_ID", "FOCUS_IDS", "MODE_IDS",
+    "RESOURCE_BY_ID", "resources_for_page", "resource_on_page",
     "mode_flags", "timeline_for", "url_slug", "attachment_kind_label",
     "is_hostile_mail", "is_hostile_prompt", "is_hostile_page",
 ]
@@ -55,6 +56,28 @@ CONVERSATION_BY_ID = _index(world.CONVERSATIONS)
 NOTE_BY_ID = _index(world.NOTES)
 PAGE_BY_URL = dict(world.BROWSER_PAGES)
 
+#: Downloadable resources, keyed by ``(url, resource_id)``. A page offers a
+#: file; the client names the *resource*, never a filename and never a path,
+#: and the server decides what actually lands in Downloads and what it is
+#: called. Both a legitimate and a look-alike site offer one, so the presence
+#: of a download is not itself a signal.
+RESOURCE_BY_ID = {}
+for _url, _page in PAGE_BY_URL.items():
+    for _resource in _page.get("resources") or ():
+        RESOURCE_BY_ID[(_url, _resource["id"])] = _resource
+
+
+def resources_for_page(url):
+    """The downloadable resources on one page, in authored order."""
+    page = PAGE_BY_URL.get(url) or {}
+    return tuple(page.get("resources") or ())
+
+
+def resource_on_page(url, resource_id):
+    """One resource, or ``None`` if that page does not offer it."""
+    return RESOURCE_BY_ID.get((url, resource_id))
+
+
 CHAIN_BY_ID = dict(scenario.CONSEQUENCE_CHAINS)
 DECISION_BY_ID = dict(scenario.DECISIONS)
 SAFER_BY_DECISION = dict(scenario.SAFER_ALTERNATIVES)
@@ -81,11 +104,16 @@ def mode_flags(mode_id):
 
 
 def timeline_for(focus_id):
-    """The authored delivery sequence for a focus.
+    """The authored delivery sequence for a focus. **Legacy.**
 
-    A fixed authored list, deliberately. Batch 3 replaces this with the
-    context-conditioned hazard scheduler; until then, calling this a
-    "scheduler" would be a claim the code does not support.
+    Batch 3 replaced this with the context-conditioned scheduler in
+    :mod:`rewindsec.training.engine`, and no session created since uses it.
+    It survives for exactly two reasons: sessions created *before* Batch 3
+    still have a half-played timeline and pending Batch 2 events in their
+    scheduler, and silently moving those into a different event universe
+    mid-attempt would change what the learner was being asked to do; and the
+    prototype UI fixtures still describe it. Neither is a reason to keep
+    extending it.
     """
     timeline = scenario.TIMELINES.get(focus_id)
     if timeline is None:

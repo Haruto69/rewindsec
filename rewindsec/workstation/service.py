@@ -51,8 +51,16 @@ every such operation advances it by a value that is *stated*, never measured:
 
 A session's state is therefore a pure function of its seed and the recorded
 sequence of application inputs. Replay them and you get the same clock, the
-same scheduler, the same events, the same world. The real timing and activity
-engine is Batch 3 work and is deliberately not invented here.
+same scheduler, the same events, the same world.
+
+What decides *what arrives*
+---------------------------
+Not this module. Since Batch 3 the sequence of workplace activity comes from
+:mod:`rewindsec.training.engine`, which evaluates on its own pulse in
+simulation time, reads the world and the Context Ledger, and draws from named
+seeded streams. This service owns actions, persistence and projection; it
+calls the engine when an engine pulse fires and tells it when the learner has
+finished with something, and it makes no selection decision of its own.
 
 Reads never mutate. :meth:`snapshot` and :meth:`comparison` load, project and
 return. They advance no clock, fire no event, consume no sequence number and
@@ -88,15 +96,20 @@ from rewindsec.workstation.errors import (ForbiddenActionError,
                                           SessionEndedError,
                                           StaleRevisionConflict,
                                           UnknownTargetError)
+from rewindsec.training import engine as training_engine
+from rewindsec.training import progression
+from rewindsec.training import state as engine_state
 from rewindsec.workstation.projection import learner_snapshot
 from rewindsec.workstation.seeds import SystemSeedSource
 
 __all__ = ["WorkstationService", "ActionResult", "DELIVERY_EVENT_TYPE",
            "TICK_QUANTUM_MS"]
 
-#: The event type an authored timeline delivery fires as. Behavioural, and
-#: deliberately uninformative: nothing in the name tells a learner what kind of
-#: thing has just arrived.
+#: The event type an arrival fires as. Behavioural, and deliberately
+#: uninformative: nothing in the name tells a learner what kind of thing has
+#: just arrived. The training engine emits the same type, so a session driven
+#: by the engine and a legacy session driven by the authored timeline are
+#: indistinguishable in the event stream.
 DELIVERY_EVENT_TYPE = "world.activity"
 
 #: Practice releases the next item a short while after the learner finishes
@@ -160,8 +173,12 @@ class WorkstationService(object):
         session = SimulationSession.create(
             session_id=session_id, learner_ref=learner_ref, focus=focus,
             mode=mode, root_seed=self._seeds.next_seed())
-        bootstrap.seed_session(session)
-        self._schedule_next_delivery(session)
+        start_event = bootstrap.seed_session(session)
+        # Every session created from here on is driven by the training engine.
+        # The authored timeline is not consulted, not scheduled and not
+        # advanced; it survives only for sessions that were already half-played
+        # when this batch landed. See ``training.state.engine_is_active``.
+        training_engine.start(session, cause_event_id=start_event.event_id)
         self._repository.create(session)
         return session_id
 
@@ -248,10 +265,17 @@ class WorkstationService(object):
         self._save_if_moved(session, expected, before_ms)
         return self._project(session)
 
-    #: A single advance is applied in at most this many slices. Reached only
-    #: by a pathological schedule; the bound exists so a bug in a consequence
-    #: that schedules another consequence cannot spin here forever.
-    _MAX_ADVANCE_SLICES = 200
+    #: A single advance is applied in at most this many slices.
+    #:
+    #: The engine schedules its own next evaluation, so a long ``dev_advance``
+    #: legitimately walks through many pulses -- at the Assessment floor of one
+    #: second, the 600-second ceiling on a single advance is 600 of them, plus
+    #: whatever consequence steps they cause. The bound is sized above that and
+    #: is a backstop, not a budget: it exists so that a future bug in which
+    #: something schedules itself at the same simulation time cannot spin here
+    #: forever. Every recurring engine pulse is floored at
+    #: ``policy.MIN_EVALUATION_INTERVAL_MS``, so simulation time always moves.
+    _MAX_ADVANCE_SLICES = 2000
 
     def _advance(self, session, elapsed_ms):
         """Move the clock to ``now + elapsed_ms``, stopping at each due time.
@@ -300,10 +324,24 @@ class WorkstationService(object):
             outcome = consequences.apply_step_event(session, event, mode_flags)
             if outcome.get("settled"):
                 self._on_chain_settled(session, outcome, mode_flags)
+        elif event.type == training_engine.EVALUATION_EVENT_TYPE:
+            # One engine pulse. Everything it does -- eligibility, pressure,
+            # the draws, the arrival, the next pulse -- happens here, inside an
+            # explicit advance of simulation time, and nowhere else.
+            training_engine.evaluate(session, event)
         elif event.type == DELIVERY_EVENT_TYPE:
+            # Legacy only: a pre-Batch-3 session still walking its authored
+            # timeline. New sessions never schedule this.
             self._deliver_from_timeline(session, event)
 
-    # -- the authored timeline --------------------------------------------
+    # -- the authored timeline (legacy sessions only) ----------------------
+    #
+    # Everything from here to ``_mark_resolved`` served Batch 2 and now serves
+    # exactly one purpose: a session created before Batch 3 has a half-played
+    # timeline and pending arrivals in its scheduler, and moving it into a
+    # different event universe mid-attempt would change what the learner was
+    # being asked to do without telling them. Those sessions finish the way
+    # they started. Nothing created since reaches any of it.
 
     def _schedule_next_delivery(self, session, delay_ms=None):
         """Queue the next authored arrival, if the timeline has one left.
@@ -377,13 +415,20 @@ class WorkstationService(object):
         self._schedule_next_delivery(session)
 
     def _mark_resolved(self, session, ref):
-        """The learner has finished with the item the timeline was waiting on.
+        """The learner has finished with the arrival that was waiting on them.
 
-        In Practice this brings the next arrival forward, which is what makes
-        the mode learner-paced rather than merely slow. The pending schedule
-        entry is cancelled and replaced, so the audit log records both the
+        In Practice this brings the next one forward, which is what makes the
+        mode learner-paced rather than merely slow. The pending schedule entry
+        is cancelled and replaced, so the audit log records both the
         cancellation and its reason.
+
+        Two implementations behind one call: the engine's for a Batch 3
+        session, the authored timeline's for a legacy one. Every handler calls
+        this and none of them knows which.
         """
+        if engine_state.engine_is_active(session):
+            training_engine.note_resolved(session, ref)
+            return
         if session.world.get(NS_SESSION, "awaiting") != ref:
             return
         session.mutate_world(NS_SESSION, "awaiting", None)
@@ -546,21 +591,68 @@ class WorkstationService(object):
         return self._project(session)
 
     def dev_deliver_next(self, session_id, learner_ref=None):
-        """Release the next authored arrival immediately. Prototype tooling."""
+        """Run the next engine evaluation immediately. Prototype tooling.
+
+        Compresses waiting, not causality: it advances simulation time to the
+        moment the next pulse was already due and lets it fire through the
+        ordinary path. The engine still evaluates eligibility, still draws from
+        the same streams at the same positions, and may still select nothing --
+        this is a fast-forward button, not a "make something happen" button.
+        """
         session = self.require_owned(session_id, learner_ref)
         if session.status is not SessionStatus.ACTIVE:
             return self._project(session)
         expected = session.revision
         before_ms = session.now_ms
-        pending = self._pending_delivery(session)
-        if pending is None:
-            self._schedule_next_delivery(session, delay_ms=1)
+        if engine_state.engine_is_active(session):
+            pending = training_engine.pending_evaluation(session)
+        else:
             pending = self._pending_delivery(session)
+            if pending is None:
+                self._schedule_next_delivery(session, delay_ms=1)
+                pending = self._pending_delivery(session)
         if pending is not None:
             remaining = max(1, pending.fire_at_ms - session.now_ms)
             self._advance(session, remaining)
         self._save_if_moved(session, expected, before_ms)
         return self._project(session)
+
+    def dev_force_candidate(self, session_id, candidate_id, learner_ref=None):
+        """Deliver one named engine candidate now. Prototype/test tooling.
+
+        The one thing ``dev_deliver_next`` cannot do: put a *specific* piece of
+        activity in front of the learner. It bypasses the lottery -- and draws
+        nothing from the threat or background streams while doing so, so using
+        it does not perturb any selection the engine makes afterwards -- but it
+        goes through the same delivery adapters, the same world operations and
+        the same causal event as a selected arrival. There is no learner route
+        to it, and it cannot produce a world the engine could not.
+        """
+        session = self.require_owned(session_id, learner_ref)
+        if session.status is not SessionStatus.ACTIVE:
+            return self._project(session)
+        if not engine_state.engine_is_active(session):
+            raise InvalidRequestError(
+                "That session predates the training engine.")
+        expected = session.revision
+        before_ms = session.now_ms
+        training_engine.force_candidate(session, candidate_id)
+        self._save_if_moved(session, expected, before_ms)
+        return self._project(session)
+
+    def dev_engine_state(self, session_id, learner_ref=None):
+        """The engine's internal state. Development boundary only.
+
+        Deliberately not part of the projection and deliberately not reachable
+        from any learner route: eligibility reasons, pressure values and the
+        selection trace are, between them, a description of what is about to
+        happen. This exists so a developer or a test can explain a decision the
+        engine made; a learner has no path to it.
+        """
+        session = self.require_owned(session_id, learner_ref)
+        if not engine_state.engine_is_active(session):
+            return {"engine_version": None, "legacy_session": True}
+        return training_engine.engine_summary(session)
 
 
 # ---------------------------------------------------------------------------
@@ -820,19 +912,67 @@ def _browser_release_payment(service, session, action, learner_action, mode_flag
     return None
 
 
+def _browser_download(service, session, action, learner_action, mode_flags):
+    """Download a file a synthetic page offers.
+
+    No fetch of any kind occurs. The client sends the page address and the
+    *resource id* the projection gave it -- never a filename, never a path,
+    never a URL to retrieve -- and the server resolves that pair against the
+    authored site map, decides what the file is, and materialises it as a row
+    in the synthetic Downloads folder.
+
+    The name it lands under comes from
+    :func:`rewindsec.workstation.worldops.resolve_download_name`, which is the
+    same single server-side resolver a mail attachment uses. There is exactly
+    one collision algorithm in this product: ``report.pdf``, then
+    ``report (1).pdf``, then ``report (2).pdf``, compared case-insensitively
+    within the folder, and nothing is ever silently overwritten. A file
+    downloaded from the Browser and the same file downloaded from Mail
+    therefore behave identically, because they are the same code.
+    """
+    url = action.params["url"]
+    if url not in ix.PAGE_BY_URL:
+        raise UnknownTargetError("No such page.")
+    resource = ix.resource_on_page(url, action.params["resource"])
+    if resource is None:
+        raise UnknownTargetError("There is nothing to download on that page.")
+
+    _visit(session, url, learner_action, service)
+    kind = resource.get("kind")
+    file_id = "f-web-%s-%s" % (ix.url_slug(url), resource["id"])
+    worldops.add_downloaded_file(
+        session, file_id=file_id, location_id="loc-downloads",
+        name=resource.get("name", ""),
+        kind="spreadsheet" if kind == "spreadsheet-macro" else kind,
+        size=resource.get("size", ""), source=url,
+        macro=(kind == "spreadsheet-macro"),
+        # ``web:`` marks a browser origin. The judgement about whether it came
+        # from somewhere hostile is made in one place, ``_from_hostile_origin``,
+        # so a workbook is equally consequential however it arrived.
+        origin_mail="web:%s" % url)
+    saved_name = (session.world.get(NS_FILES, file_id) or {}).get(
+        "name") or resource.get("name", "")
+    if not session.ledger.has(file_fact(file_id)):
+        session.introduce_fact(
+            file_fact(file_id), category="file_metadata",
+            value={"name": saved_name, "source": url},
+            source="filesystem", available=True)
+    worldops.raise_notification(
+        session, kind="system", title="Download complete",
+        body="%s is in your Downloads folder." % saved_name,
+        opens={"app": "files", "location_id": "loc-downloads"})
+    if ix.is_hostile_page(url):
+        return service._decide(session, "d-ransom-web-download", learner_action,
+                               "Browser", mode_flags)
+    return None
+
+
 def _browser_support(service, session, action, learner_action, mode_flags):
     choice = action.params["choice"]
     if choice == "isolate":
-        worldops.set_session_flag(session, "network_disconnected", True)
-        worldops.set_incident_contained(session, "inc-files", True)
-        if session.world.has(NS_INCIDENTS, "inc-files") \
-                and not consequences.already_decided(session, "d-ransom-isolate"):
-            return service._decide(session, "d-ransom-isolate", learner_action,
-                                   "Service Desk", mode_flags)
-        worldops.raise_notification(
-            session, kind="system", title="Network disconnected",
-            body="This workstation is off the network.", opens=None)
-        return None
+        return _isolate(service, session, learner_action, mode_flags)
+    if choice == "reconnect":
+        return _reconnect(service, session, learner_action, mode_flags)
 
     worldops.raise_notification(
         session, kind="system", title="Incident raised",
@@ -841,6 +981,119 @@ def _browser_support(service, session, action, learner_action, mode_flags):
         session, "conv-lena-fischer", "Lena Fischer",
         "Thanks - I can see your ticket. Someone is picking it up now.")
     return None
+
+
+def _isolate(service, session, learner_action, mode_flags):
+    """Take this workstation off the network.
+
+    Six things happen, in this order, and the order is the design:
+
+    1. a :class:`LearnerAction` is already recorded -- the caller did that;
+    2. the authoritative network flag flips, and the simulation time of the
+       *first* isolation is recorded and never cleared;
+    3. every network-dependent consequence that had not yet happened is
+       latched as contained, with an internal event naming chain, step and
+       reason;
+    4. an open file incident is marked **contained** -- and not recovered:
+       nothing is restored, no incident is closed, no file comes back, and no
+       account is un-compromised;
+    5. with an incident, this is the recovery decision it always was. Without
+       one, it is an operational decision with an operational cost, and the
+       simulation charges it;
+    6. nothing that has already happened is touched. Files that stopped
+       opening stay closed. That asymmetry is the entire point.
+
+    Isolating twice is one isolation. The second attempt is refused before any
+    of this runs, so no incident is opened twice, no chain is scheduled twice
+    and no consequence is duplicated.
+    """
+    if engine_state.is_isolated(session):
+        return {"kind": "notice",
+                "text": "This workstation is already off the network."}
+
+    if not engine_state.engine_is_active(session):
+        # A session created before Batch 3. It gets the behaviour it started
+        # with, exactly: the flag, the containment mark, the recovery decision
+        # if an incident is open, and nothing else. Introducing containment
+        # semantics or an operational cost into an attempt already in progress
+        # would change what its learner was being asked to do.
+        return _isolate_legacy(service, session, learner_action, mode_flags)
+
+    engine_state.set_isolated(session, True)
+    contained_steps = progression.on_isolation(session)
+    has_incident = session.world.has(NS_INCIDENTS, "inc-files")
+
+    # "Was there anything to contain?" is answered by the world, not by
+    # whether an incident banner happens to be on screen yet. A learner who
+    # opens a bad workbook and pulls the cable ten seconds later, before the
+    # first file has failed, has contained something real: the chain is in
+    # flight and its network steps have just been stopped. Judging that by the
+    # banner would call the fastest correct response an over-reaction.
+    if has_incident or contained_steps:
+        if has_incident:
+            # Contained, not recovered. The two are stored as separate facts
+            # precisely so a later batch cannot collapse them by accident. An
+            # incident that opens *after* this point opens contained -- see
+            # ``consequences._chain_is_contained``.
+            worldops.set_incident_contained(session, "inc-files", True)
+        if not consequences.already_decided(session, "d-ransom-isolate"):
+            return service._decide(session, "d-ransom-isolate", learner_action,
+                                   "Service Desk", mode_flags)
+        worldops.raise_notification(
+            session, kind="system", title="Network disconnected",
+            body="This workstation is off the network.", opens=None)
+        return None
+
+    # Nothing to contain. Disconnecting is not free, and a training
+    # environment in which it were would teach that pulling the cable is
+    # always the right first move.
+    worldops.raise_notification(
+        session, kind="system", title="Network disconnected",
+        body="This workstation is off the network. Mail, shared folders and "
+             "remote access are unavailable until it is reconnected.",
+        opens=None)
+    worldops.set_session_flag(session, "vpn_connected", False)
+    return service._decide(session, "d-isolate-no-incident", learner_action,
+                           "Service Desk", mode_flags)
+
+
+def _isolate_legacy(service, session, learner_action, mode_flags):
+    """Batch 2's isolation, preserved verbatim for Batch 2's sessions."""
+    worldops.set_session_flag(session, "network_disconnected", True)
+    worldops.set_incident_contained(session, "inc-files", True)
+    if session.world.has(NS_INCIDENTS, "inc-files") \
+            and not consequences.already_decided(session, "d-ransom-isolate"):
+        return service._decide(session, "d-ransom-isolate", learner_action,
+                               "Service Desk", mode_flags)
+    worldops.raise_notification(
+        session, kind="system", title="Network disconnected",
+        body="This workstation is off the network.", opens=None)
+    return None
+
+
+def _reconnect(service, session, learner_action, mode_flags):
+    """Put the workstation back on the network.
+
+    Narrow on purpose: one action, one flag, no network-management UI. It
+    exists so isolation cannot soft-lock a session -- a learner who
+    disconnected early must still be able to finish, report, investigate and
+    reach the debrief.
+
+    It is consequential, and it is not an undo. Consequences that isolation
+    already contained stay contained: the latch in
+    :mod:`rewindsec.training.progression` is a record of what was true when
+    the step would have run, and reconnecting does not change the past. What
+    reconnecting restores is the learner's ability to receive new work.
+    """
+    if not engine_state.is_isolated(session):
+        return {"kind": "notice",
+                "text": "This workstation is already on the network."}
+    engine_state.set_isolated(session, False)
+    worldops.raise_notification(
+        session, kind="system", title="Network reconnected",
+        body="This workstation is back on the network.", opens=None)
+    return service._decide(session, "d-network-reconnect", learner_action,
+                           "Service Desk", mode_flags)
 
 
 # -- files ------------------------------------------------------------------
@@ -867,13 +1120,40 @@ def _files_open(service, session, action, learner_action, mode_flags):
             body=state.get("note") or "The file could not be read.", opens=None)
         return None
     origin = state.get("origin_mail")
-    if state.get("macro") and origin and ix.is_hostile_mail(origin):
+    if state.get("macro") and _from_hostile_origin(origin):
         return service._decide(session, "d-ransom-open", learner_action,
                                "Files", mode_flags)
+    # There is no document viewer, so the workstation does not claim one.
+    #
+    # Batch 2 answered every open with "Opened in the document viewer.", which
+    # was untrue: nothing was rendered, nothing was parsed, and no such surface
+    # exists. A synthetic workstation may show a learner a synthetic document,
+    # but it may not tell them it did something it did not do -- the whole
+    # exercise depends on what is on screen being reliable. The safe
+    # read-only document viewer is Batch 4's, alongside the synthetic content
+    # work it needs; until then an open reports what the file *is*.
+    service._observe(session, file_fact(action.target), learner_action)
+    detail = " . ".join(part for part in (
+        state.get("size") or "", state.get("modified") or "") if part)
     worldops.raise_notification(
-        session, kind="system", title=state.get("name", ""),
-        body="Opened in the document viewer.", opens=None)
+        session, kind="file", title=state.get("name", ""),
+        body=("No preview available on this workstation. %s" % detail).strip(),
+        opens=None)
     return None
+
+
+def _from_hostile_origin(origin):
+    """Whether a downloaded file came from somewhere the author marked hostile.
+
+    A file can now arrive from a message *or* from a page in the Browser, and
+    both have to reach the same judgement -- otherwise the same workbook would
+    be consequential when mailed and inert when downloaded.
+    """
+    if not origin:
+        return False
+    if origin.startswith("web:"):
+        return ix.is_hostile_page(origin[4:])
+    return ix.is_hostile_mail(origin)
 
 
 def _files_delete(service, session, action, learner_action, mode_flags):
@@ -1215,6 +1495,7 @@ _HANDLERS = {
     "browser.sign_in_retry": _browser_sign_in_retry,
     "browser.release_payment": _browser_release_payment,
     "browser.support_action": _browser_support,
+    "browser.download": _browser_download,
 
     "files.inspect": _files_inspect,
     "files.open": _files_open,

@@ -37,6 +37,7 @@ WORKSTATION = "/prototype/workstation"
 SESSION = "/prototype/api/session"
 ACTIONS = "/prototype/api/actions"
 DELIVER = "/prototype/api/dev/deliver-next"
+DELIVER_CANDIDATE = "/prototype/api/dev/deliver-candidate"
 ADVANCE = "/prototype/api/dev/advance"
 
 
@@ -73,7 +74,29 @@ def act(client, action, target=None, params=None):
     return post(client, ACTIONS, payload)
 
 
+#: Which engine candidate delivers which message. Only the ids these suites
+#: actually need; the engine's own selection is tested in
+#: ``tests/test_rewindsec2_training_engine.py``, without this.
+CANDIDATE_FOR_MAIL = {"m-payroll-restructure": "cand-phish-payroll-lure",
+                      "m-rate-card": "cand-ransom-rate-card",
+                      "m-invoice-amend": "cand-bec-account-change"}
+
+
 def deliver_until(client, mail_id, limit=8):
+    """Put *mail_id* in the mailbox over HTTP.
+
+    Batch 2 walked the authored timeline until this message came up. The
+    timeline no longer drives a session, and an engine pulse may legitimately
+    select nothing, so the message is asked for by name through the
+    development endpoint -- which bypasses probability and nothing else.
+    """
+    if message(snapshot(client), mail_id):
+        return
+    candidate = CANDIDATE_FOR_MAIL.get(mail_id)
+    if candidate is not None:
+        post(client, DELIVER_CANDIDATE, {"candidate": candidate})
+        if message(snapshot(client), mail_id):
+            return
     for _ in range(limit):
         if message(snapshot(client), mail_id):
             return

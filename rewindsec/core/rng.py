@@ -54,9 +54,13 @@ __all__ = [
     "dumps_state",
     "MAX_ROOT_SEED",
     "STATE_VERSION",
+    "STREAM_BACKGROUND",
+    "STREAM_CONSEQUENCE",
+    "STREAM_CONTENT_VARIATION",
     "STREAM_DISTRACTORS",
     "STREAM_MAIL_GENERATION",
     "STREAM_PERSONA",
+    "STREAM_THREAT_SELECTION",
     "STREAM_TIMING",
 ]
 
@@ -88,6 +92,20 @@ STREAM_MAIL_GENERATION = "mail_generation"
 STREAM_TIMING = "timing"
 STREAM_DISTRACTORS = "distractors"
 STREAM_PERSONA = "persona"
+
+#: The five streams architecture S16.1 names as the minimum partition, added
+#: for the Batch 3 training engine. They are *new* names rather than a
+#: renaming of the four above, which matters: a stream's seed is derived from
+#: its name, so renaming ``timing`` would silently change every stored
+#: session's future timing, while adding ``threat_selection`` cannot perturb a
+#: single draw of any stream that already existed.
+#:
+#: ``STREAM_TIMING`` continues to serve the "event timing" role; the four new
+#: names cover the roles nothing owned before.
+STREAM_BACKGROUND = "background"
+STREAM_THREAT_SELECTION = "threat_selection"
+STREAM_CONTENT_VARIATION = "content_variation"
+STREAM_CONSEQUENCE = "consequence"
 
 
 class RngError(Exception):

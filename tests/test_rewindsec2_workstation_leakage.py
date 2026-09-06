@@ -145,14 +145,34 @@ def test_a_fresh_snapshot_leaks_nothing(driver):
 
 
 def test_a_snapshot_full_of_hostile_content_still_leaks_nothing(driver):
-    """The interesting case: every authored hostile record delivered at once."""
-    for _ in range(10):
-        driver.deliver_next()
+    """The interesting case: every hostile record the engine can deliver, at once.
+
+    Batch 2 got here by exhausting the authored timeline. There is no timeline
+    now, and a run of pulses may legitimately deliver nothing hostile at all --
+    which would have turned this into a test that passed by delivering nothing
+    and inspecting an empty mailbox.
+
+    So every hostile candidate in the catalogue is named and forced, and the
+    assertion is *stronger* than the Batch 2 one: not "at least one hostile
+    message arrived" but "every hostile message the engine is capable of
+    producing is in this document, and it still leaks nothing". A new hostile
+    candidate is covered the day it is authored, without anyone remembering to
+    extend this test.
+    """
+    from rewindsec.training import catalog
+
+    hostile_candidates = [c for c in catalog.all_candidates() if c.hostile]
+    assert hostile_candidates, "the catalogue has no hostile candidates"
+    for candidate in hostile_candidates:
+        driver.force(candidate.candidate_id)
     snapshot = driver.snapshot()
 
     delivered = {entry["id"] for entry in snapshot["mail"]["messages"]}
-    hostile = {m for m in ix.MAIL_BY_ID if ix.is_hostile_mail(m)}
-    assert delivered & hostile, "no hostile message was delivered"
+    hostile_mail = {c.delivers_mail for c in hostile_candidates if c.delivers_mail}
+    assert hostile_mail <= delivered, sorted(hostile_mail - delivered)
+    assert delivered & {m for m in ix.MAIL_BY_ID if ix.is_hostile_mail(m)}
+    # ...and the hostile approval request, which is not a message at all.
+    assert snapshot["authenticator"]["requests"]
 
     assert forbidden_keys(snapshot) == []
     assert forbidden_values(snapshot) == []
@@ -253,8 +273,7 @@ def test_attachment_details_are_absent_until_inspected(driver):
 
 
 def test_approval_request_context_is_absent_until_inspected(driver):
-    for _ in range(10):
-        driver.deliver_next()
+    driver.force("cand-mfa-unsolicited")
     snapshot = driver.snapshot()
     requests = snapshot["authenticator"]["requests"]
     assert requests, "no approval request was raised"

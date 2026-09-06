@@ -270,20 +270,49 @@ def test_a_rejected_download_leaves_no_partial_file(driver):
 # The browser
 # ===========================================================================
 
-def test_the_browser_has_no_download_action_to_bypass_this(driver):
-    """If one is added later, it materialises files through the same door.
+def test_the_browser_download_goes_through_the_same_door(driver):
+    """Batch 3 added a browser download. It reuses the one resolver.
 
-    There is exactly one function that puts a downloaded file in the world,
-    and it resolves the name itself, so a future browser download cannot get
-    a colliding name by forgetting to ask.
+    Batch 2 asserted there was no such action, which was true and is no longer
+    the point: the guarantee was never "the browser cannot download", it was
+    "there is exactly one place a downloaded file enters the world, and it
+    decides the name". That is the assertion now, and it is a stronger one,
+    because there are two callers to keep honest instead of one.
     """
     from rewindsec.workstation.actions import ACTION_SPECS
 
-    assert not [name for name in ACTION_SPECS
-                if name.startswith("browser.") and "download" in name]
+    assert "browser.download" in ACTION_SPECS
+    spec = ACTION_SPECS["browser.download"]
+    # The client names a page and a resource id. There is no parameter through
+    # which it could name a filename, a path or something to fetch.
+    assert sorted(spec.params) == ["resource", "url"]
+    assert not any(key in spec.params for key in ("name", "filename", "path"))
 
     source = io.open("rewindsec/workstation/service.py", encoding="utf-8").read()
-    assert source.count("worldops.add_downloaded_file(") == 1
+    # Two callers -- mail and browser -- and one function they both go through.
+    assert source.count("worldops.add_downloaded_file(") == 2
+    resolver = io.open("rewindsec/workstation/worldops.py",
+                       encoding="utf-8").read()
+    assert resolver.count("def resolve_download_name(") == 1
+
+
+def test_a_browser_download_and_a_mail_download_collide_identically(driver):
+    """Same folder, same name, same resolver -- so the same numbered result.
+
+    The maintenance page offers the same guide the service desk attaches.
+    Downloading both must leave two files, the second numbered, exactly as two
+    mail attachments of the same name would.
+    """
+    driver.deliver_until("m-it-attachment")
+    driver.act("mail.download_attachment", "m-it-attachment", {"index": 0})
+    driver.act("browser.download", params={
+        "url": "intranet.northbridge.example/it/maintenance",
+        "resource": "res-access-guide"})
+
+    names = sorted(row["name"] for row in driver.snapshot()["files"]["files"]
+                   if row["location"] == "loc-downloads"
+                   and row["name"].startswith("Remote_Access_Guide"))
+    assert names == ["Remote_Access_Guide (1).pdf", "Remote_Access_Guide.pdf"]
 
 
 # ===========================================================================

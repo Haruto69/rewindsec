@@ -989,7 +989,30 @@
     return '<div class="pw-site">'
       + '<div class="pw-site-head"><h1>' + esc(page.heading) + '</h1>'
       + '<p>' + esc(page.subheading || '') + '</p></div>'
-      + sections + '</div>';
+      + sections + renderPageDownloads(page) + '</div>';
+  }
+
+  /* Files a page offers. Every value comes from the server's projection and
+   * is escaped on the way in; the button carries the *resource id* the server
+   * gave us and the page address, and nothing else -- there is no filename
+   * here, no path, and no URL to fetch. What lands in Downloads, and what it
+   * ends up called, is the server's decision. */
+  function renderPageDownloads(page) {
+    var resources = page.resources || [];
+    if (!resources.length) { return ''; }
+    return '<section class="pw-site-section"><h2>Downloads</h2><ul>'
+      + resources.map(function (resource) {
+          return '<li>'
+            + '<strong>' + esc(resource.name) + '</strong> '
+            + '<span class="pw-hint">' + esc(resource.kind_label)
+            + (resource.size ? ' \u00b7 ' + esc(resource.size) : '')
+            + '</span> '
+            + '<button type="button" class="pw-btn"'
+            + ' data-page-download="' + esc(resource.id) + '"'
+            + ' data-page-url="' + esc(page.url) + '">Download</button>'
+            + '</li>';
+        }).join('')
+      + '</ul></section>';
   }
 
   /* The sign-in form never reads the password field, never serialises it and
@@ -1112,14 +1135,24 @@
             + esc(files.note) + '</div>' : '')
       + '<section class="pw-site-section"><h2>Actions</h2>'
       + '<div class="pw-row">'
-      + '<button type="button" class="pw-btn' + (offline ? '' : ' is-primary')
-      + '" data-support="isolate"' + (offline ? ' disabled' : '') + '>'
-      + (offline ? 'Workstation is disconnected'
-                 : 'Disconnect this workstation from the network')
-      + '</button>'
+      + (offline
+          ? '<button type="button" class="pw-btn is-primary"'
+            + ' data-support="reconnect">'
+            + 'Reconnect this workstation to the network</button>'
+          : '<button type="button" class="pw-btn is-primary"'
+            + ' data-support="isolate">'
+            + 'Disconnect this workstation from the network</button>')
       + '<button type="button" class="pw-btn" data-support="raise">'
       + 'Raise an incident with the Service Desk</button>'
       + '</div>'
+      /* Says what being off the network costs, without saying whether being
+       * off it was the right call. The server decides that; this only
+       * describes the state the workstation is actually in. */
+      + (offline
+          ? '<p class="pw-note is-caution" style="margin-top:.7rem">'
+            + 'This workstation is off the network. New mail, shared folders '
+            + 'and remote access are unavailable until it is reconnected.</p>'
+          : '')
       + '<p class="pw-hint" style="margin-top:.7rem">' + esc(page.note) + '</p>'
       + '</section>'
       + ((page.sections || []).map(function (section) {
@@ -1884,6 +1917,14 @@
 
     hit = closestData(event.target, 'data-support');
     if (hit) { send('browser.support_action', null, { choice: hit.value }); return; }
+
+    hit = closestData(event.target, 'data-page-download');
+    if (hit) {
+      send('browser.download', null,
+           { url: hit.node.getAttribute('data-page-url'),
+             resource: hit.value });
+      return;
+    }
 
     // -- files ---------------------------------------------------------------
     hit = closestData(event.target, 'data-file-location');

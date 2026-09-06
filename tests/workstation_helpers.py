@@ -14,11 +14,22 @@ import sqlalchemy as sa
 
 from rewindsec.persistence.sqlalchemy_adapter import SqlAlchemySessionRepository
 from rewindsec.workstation.actions import parse_action_request
+from rewindsec.workstation.errors import InvalidRequestError
 from rewindsec.workstation.seeds import FixedSeedSource
 from rewindsec.workstation.service import WorkstationService
 
 LEARNER = "learner-test-1"
 OTHER_LEARNER = "learner-test-2"
+
+
+def candidate_delivering(mail_id):
+    """The engine candidate that delivers *mail_id*, or ``None``."""
+    from rewindsec.training import catalog
+
+    for candidate in catalog.all_candidates():
+        if candidate.delivers_mail == mail_id:
+            return candidate.candidate_id
+    return None
 
 
 def sqlite_uri(tmp_path, name="workstation.db"):
@@ -96,10 +107,49 @@ class Driver(object):
         return snapshot
 
     def deliver_next(self):
+        """Run the next engine evaluation now. May legitimately deliver nothing."""
         return self.service.dev_deliver_next(self.session_id, self.learner_ref)
 
+    def force(self, candidate_id):
+        """Deliver one named engine candidate immediately."""
+        return self.service.dev_force_candidate(
+            self.session_id, candidate_id, self.learner_ref)
+
     def deliver_until(self, mail_id, limit=8):
-        """Release authored arrivals until *mail_id* is in the mailbox."""
+        """Put *mail_id* in the mailbox, whatever the engine would have chosen.
+
+        Batch 2 walked the authored timeline until the message it wanted came
+        up. There is no timeline any more, and a suite that wants to exercise
+        what happens *after* a particular message arrives should not have to
+        win a lottery to get it -- nor should it silently pass because the
+        engine happened to deliver something else.
+
+        So this asks the engine for that message by name, through the
+        development-only ``dev_force_candidate`` path. That bypasses
+        probability and nothing else: the delivery uses the same adapter, the
+        same world operations and the same causal event a selected arrival
+        would, and it draws nothing from the threat or background streams, so
+        forcing a message here does not perturb any later selection.
+
+        The engine's own selection behaviour is tested directly, without this,
+        in ``tests/test_rewindsec2_training_engine.py``.
+        """
+        snapshot = self.snapshot()
+        if any(m["id"] == mail_id for m in snapshot["mail"]["messages"]):
+            return snapshot
+        candidate_id = candidate_delivering(mail_id)
+        if candidate_id is not None:
+            try:
+                self.force(candidate_id)
+            except InvalidRequestError:
+                # A pre-Batch-3 session, which has no engine to ask. It walks
+                # its authored timeline instead, exactly as it always did.
+                pass
+            else:
+                snapshot = self.snapshot()
+                if any(m["id"] == mail_id for m in snapshot["mail"]["messages"]):
+                    return snapshot
+        # Legacy sessions, and anything the catalogue does not deliver.
         for _ in range(limit):
             snapshot = self.snapshot()
             if any(m["id"] == mail_id for m in snapshot["mail"]["messages"]):

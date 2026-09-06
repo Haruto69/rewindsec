@@ -262,14 +262,16 @@ def test_a_duplicated_consequential_submission_applies_once(client, flask_app):
     body = start(client, focus="phishing")
     revision = body["session"]["revision"]
 
-    # Bring the lookalike payroll message into the mailbox.
-    for _ in range(4):
-        response = client.post("/prototype/api/dev/deliver-next", data="{}",
-                               headers=headers(client))
-        assert response.status_code == 200
-        if any(m["id"] == "m-payroll-restructure"
-               for m in response.get_json()["snapshot"]["mail"]["messages"]):
-            break
+    # Bring the lookalike payroll message into the mailbox. Named rather
+    # than waited for: under the training engine a pulse may select nothing,
+    # and a loop that hoped for this message would flake.
+    response = client.post(
+        "/prototype/api/dev/deliver-candidate",
+        data=json.dumps({"candidate": "cand-phish-payroll-lure"}),
+        headers=headers(client))
+    assert response.status_code == 200, response.data[:300]
+    assert any(m["id"] == "m-payroll-restructure"
+               for m in response.get_json()["snapshot"]["mail"]["messages"])
 
     revision = snapshot(client)["session"]["revision"]
     first = act(client, "mail.report", "m-payroll-restructure", revision=revision)

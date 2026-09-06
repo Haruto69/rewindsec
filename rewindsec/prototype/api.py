@@ -357,6 +357,56 @@ def register_workstation_api(bp, service_factory, updates):
         return ok({"snapshot": service.dev_deliver_next(
             session_id, learner_ref())})
 
+    @bp.route("/api/dev/deliver-candidate", methods=["POST"])
+    def api_dev_deliver_candidate():
+        """Deliver one named engine candidate. Development tooling.
+
+        The only endpoint in the product that names a candidate, and it exists
+        so a developer or a suite can put a *specific* piece of activity in
+        front of the learner instead of waiting for the engine to choose it.
+        It bypasses the lottery and nothing else: the same adapter, the same
+        world operations, the same causal event, and no draw from any
+        selection stream.
+
+        It reveals nothing. The caller has to already know the candidate id to
+        use it, and the response is the ordinary learner projection -- the same
+        document, filtered the same way, with no engine field in it.
+        """
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        payload = body()
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("The request body must be a JSON object.")
+        unknown = sorted(set(payload) - {"candidate", "csrf_token"})
+        if unknown:
+            raise InvalidRequestError(
+                "Unrecognised field(s): %s." % ", ".join(unknown))
+        candidate = payload.get("candidate")
+        if not isinstance(candidate, str) or not candidate \
+                or len(candidate) > 128:
+            raise InvalidRequestError("A candidate id is required.")
+        return ok({"snapshot": service.dev_force_candidate(
+            session_id, candidate, learner_ref())})
+
+    @bp.route("/api/dev/engine", methods=["POST"])
+    def api_dev_engine():
+        """The engine's internal state. Development boundary only.
+
+        Deliberately a separate endpoint under ``/api/dev/`` rather than a
+        field on the learner snapshot. Eligibility reasons, family pressure
+        and the selection trace are between them a description of what is
+        about to happen, and there must be exactly one document a learner's
+        browser receives -- the projection -- with none of it in there.
+        """
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        body()
+        return ok({"engine": service.dev_engine_state(session_id, learner_ref())})
+
 
 def _frame(event_id, event_name, payload):
     """One SSE frame. The revision is the event id, so reconnect is trivial."""

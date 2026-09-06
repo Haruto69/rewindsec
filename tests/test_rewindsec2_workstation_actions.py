@@ -388,7 +388,7 @@ def test_opening_a_notification_marks_it_read(driver):
 
 
 def test_marking_all_read_clears_the_badge(driver):
-    driver.deliver_next()
+    driver.deliver_until("m-payroll-restructure")
     driver.act("notifications.mark_read")
     assert all(not n["unread"] for n in driver.snapshot()["notifications"])
 
@@ -399,10 +399,29 @@ def test_an_unknown_notification_is_refused(driver):
 
 
 def test_notifications_are_server_authored(driver):
-    """A consequence's notification comes from the server, not the browser."""
-    before = len(driver.snapshot()["notifications"])
-    driver.deliver_next()
-    assert len(driver.snapshot()["notifications"]) > before
+    """An arrival's notification comes from the server, not the browser.
+
+    Batch 2 asserted this by calling ``deliver_next`` and requiring that a
+    notification appeared, which worked because the authored timeline always
+    delivered something. The engine may legitimately evaluate and select
+    nothing, so requiring an arrival from a pulse would now be asserting that
+    a lottery was won -- a test that passes for the wrong reason today and
+    flakes tomorrow.
+
+    So the arrival is named, and the assertion is *stronger* than before: the
+    notification exists, it names the sender and subject the server holds, and
+    it carries the server's own routing target. None of that came from a
+    browser, and none of it could have.
+    """
+    before = {n["id"] for n in driver.snapshot()["notifications"]}
+    driver.deliver_until("m-payroll-restructure")
+    after = [n for n in driver.snapshot()["notifications"]
+             if n["id"] not in before]
+    assert after, "the arrival raised no notification"
+    raised = after[-1]
+    assert raised["kind"] == "mail"
+    assert raised["opens"] == {"app": "mail", "mail_id": "m-payroll-restructure"}
+    assert raised["unread"] is True
 
 
 # ===========================================================================
@@ -467,6 +486,20 @@ def pending_request(driver):
 
 
 def raise_a_request(driver, limit=10):
+    """Get an unsolicited approval request in front of the learner.
+
+    Named rather than waited for, for the same reason ``deliver_until`` is:
+    under the training engine a phishing-focused session may never draw the
+    MFA family, and a helper that waited for one would either flake or quietly
+    stop testing anything.
+    """
+    entry = pending_request(driver)
+    if entry:
+        return entry
+    driver.force("cand-mfa-unsolicited")
+    entry = pending_request(driver)
+    if entry:
+        return entry
     for _ in range(limit):
         entry = pending_request(driver)
         if entry:

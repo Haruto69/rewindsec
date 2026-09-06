@@ -8,11 +8,19 @@ schedules its steps on the session's own
 server chose, and each step is applied when its event actually fires. The
 browser is told what happened; it is never the thing that decides.
 
-What this is not
-----------------
-This is not the Batch 3 threat engine. The chains are the same fixed authored
-trees the prototype used -- no generation, no family selection, no hazard
-state, no eligibility evaluation. What has changed is *who owns them*.
+What this module owns, after Batch 3
+------------------------------------
+The *generic* half of consequences: recording a decision, queueing its
+authored chain, applying a fired step's effects, and wiring the result into
+the causal graph. It does not know what a threat family is, and there is no
+``if phishing / elif ransomware`` anywhere in it.
+
+The *family-specific* half moved to :mod:`rewindsec.training.progression`,
+which answers one question this module asks twice -- at scheduling and at
+firing: may this step happen at all? A ransomware step that writes to a
+network share cannot happen on a workstation that has been taken off the
+network, and without that question "isolate the machine" would be a button
+that changed a flag and nothing else.
 
 Determinism and resume
 ----------------------
@@ -33,6 +41,7 @@ explanation -- the factual world it describes stays exactly as it is.
 """
 
 from rewindsec.core.events import EventSource, EventVisibility
+from rewindsec.training import progression
 from rewindsec.workstation import worldops
 from rewindsec.workstation.bootstrap import (NS_DECISIONS, NS_INCIDENTS,
                                              NS_SESSION)
@@ -115,6 +124,14 @@ def _schedule_chain(session, chain, decision_id, action_id, mode_flags,
     """
     scale = mode_flags.get("consequence_delay_scale", 1.0)
     for step in chain["steps"]:
+        if not progression.should_schedule(session, chain["id"], step["id"]):
+            # Containment was already in force when this chain started. The
+            # step is still queued -- so the chain keeps its shape, its timing
+            # and its settling point -- but it is latched now, and when it
+            # fires it will change nothing.
+            progression.suppress(session, chain["id"], step["id"],
+                                 "network_isolation",
+                                 cause_event_id=cause_event_id)
         delay = int(max(1, round(step.get("delay_ms", 0) * scale)))
         session.schedule_event(
             CONSEQUENCE_EVENT_TYPE, delay_ms=delay,
@@ -145,6 +162,21 @@ def apply_step_event(session, event, mode_flags):
     if step is None:
         return {}
 
+    if not progression.should_apply(session, chain["id"], step["id"]):
+        # The step came due, but the effect it describes could not happen:
+        # containment was already in force. No effect is applied, no incident
+        # is opened and no consequence is recorded -- so nothing in the causal
+        # graph points at something that did not occur.
+        #
+        # It still *settles* the chain if it was the settling step. The chain
+        # has reached its resting point -- earlier than it would have, because
+        # the learner stopped it -- and a Practice or Simulation learner is
+        # owed the explanation either way.
+        return {"chain": chain["id"], "step": step["id"],
+                "decision": payload.get("decision"),
+                "settled": step["id"] == chain.get("settles_after"),
+                "suppressed": True, "summary": ""}
+
     decision_id = payload.get("decision")
     action_id = payload.get("action")
     incident_key = chain.get("incident_id")
@@ -157,6 +189,17 @@ def apply_step_event(session, event, mode_flags):
             _incident_note(step) or chain.get("title", ""),
             cause_event_id=event.event_id)
         first_mutation = first_mutation or mutation
+        if mutation is not None and _chain_is_contained(session, chain):
+            # The learner contained this before its first visible effect
+            # landed. The incident is real -- something did happen to their
+            # files -- and it opens already contained, because the steps that
+            # would have spread it have been latched as never-to-happen.
+            #
+            # Generic on purpose: "a chain with latched steps opens contained"
+            # is a statement about chains, not about ransomware, so a future
+            # family gets the same behaviour without a branch here.
+            worldops.set_incident_contained(session, incident_key, True,
+                                            cause_event_id=event.event_id)
 
     for effect in step.get("effects", []):
         mutation = _apply_effect(session, effect, event.event_id)
@@ -190,6 +233,12 @@ def apply_step_event(session, event, mode_flags):
         "settled": settled,
         "summary": step.get("summary", ""),
     }
+
+
+def _chain_is_contained(session, chain):
+    """Whether any step of this chain has been latched as suppressed."""
+    return any(progression.should_apply(session, chain["id"], step["id"]) is False
+               for step in chain["steps"])
 
 
 def _step(chain, step_id):

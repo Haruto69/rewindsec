@@ -352,6 +352,20 @@ def _page_view(session, url, page):
     # Deliberately absent: ``signin_id``. It names the authored sign-in
     # handler, and one of those names says what the page is. The client posts
     # the address and the server resolves the handler.
+    # What this page offers to download: a display name, a size and the id
+    # the client sends back. Never a URL to retrieve and never a path -- there
+    # is nothing to retrieve. Both a legitimate and a look-alike site offer
+    # one, and they project identically, so the presence of a download is not
+    # itself evidence.
+    resources = ix.resources_for_page(url)
+    if resources:
+        view["resources"] = [
+            {"id": resource["id"], "name": resource.get("name", ""),
+             "size": resource.get("size", ""),
+             "label": resource.get("label", ""),
+             "kind_label": ix.attachment_kind_label(resource.get("kind"))}
+            for resource in resources
+        ]
     if page.get("kind") == "filelist":
         view["location_id"] = page.get("location_id")
     if page.get("kind") == "payments" and page.get("invoice"):

@@ -886,6 +886,169 @@ MAIL = [
             "establishes_context": [],
         },
     },
+
+    # -- Batch 3 candidate material ---------------------------------------
+    #
+    # Four more messages, added because the training engine needs something to
+    # choose *between*. Three of them are legitimate, and that is the point:
+    # each threat family now has a genuine counterpart that arrives from the
+    # same kind of sender, about the same kind of thing, and is separated from
+    # the attack only by evidence the learner has to go and find. Without them
+    # a focused session would be a corpus of nothing but attacks, and "report
+    # everything" would be the correct strategy.
+    #
+    # All of it is authored synthetic content written for this repository. No
+    # phishing corpus is ingested, nothing is derived from a real message, and
+    # every address is under a reserved TLD. The dataset provenance and
+    # sanitisation pipeline the architecture specifies is Batch 4's.
+    {
+        "id": "m-payroll-genuine",
+        "arrival": "scheduled",
+        "folder": "inbox",
+        "thread_id": "t-payroll",
+        "unread": True,
+        "received": "+ later",
+        "order": 120,
+        "surface": {
+            "subject": "Payslip access is moving to single sign-on",
+            "from_name": "Northbridge Payroll",
+            "from_address": "payroll@northbridge.example",
+            "reply_to": "priya.menon@northbridge.example",
+            "to": "all-staff@northbridge.example",
+            "body": [
+                "Hi all,",
+                "From the end of the month the payroll portal will only "
+                "accept single sign-on. You will not be asked to set a "
+                "separate password, and payroll will never ask you to confirm "
+                "your salary details by email.",
+                "Nothing is required from you. If you cannot reach the portal "
+                "after the change, call the Service Desk on 2200.",
+                "Priya Menon\nPayroll Coordinator, Northbridge Systems",
+            ],
+            "links": [
+                {"text": "Payroll portal",
+                 "href": "https://payroll.northbridge.example/payslips"},
+            ],
+            "attachments": [],
+        },
+        "analysis": {
+            "disposition": "legitimate",
+            "family": None,
+            "why": "The phishing family's honest counterpart. Payroll sender "
+                   "of record, payroll host of record, and it asks for "
+                   "nothing -- which is the difference the learner has to "
+                   "find, rather than a difference in tone.",
+            "establishes_context": ["payroll_sender", "payroll_host"],
+        },
+    },
+    {
+        "id": "m-it-attachment",
+        "arrival": "scheduled",
+        "folder": "inbox",
+        "thread_id": "t-it-maintenance",
+        "unread": True,
+        "received": "+ later",
+        "order": 130,
+        "surface": {
+            "subject": "Remote access: short guide before the maintenance "
+                       "window",
+            "from_name": "IT Service Desk",
+            "from_address": "it.servicedesk@northbridge.example",
+            "reply_to": None,
+            "to": "operations@northbridge.example",
+            "body": [
+                "Hello,",
+                "Ahead of the gateway maintenance on Saturday, the two-page "
+                "guide attached covers reconnecting afterwards. It is a PDF; "
+                "there is nothing to enable and nothing to sign in to.",
+                "Any problems, raise a ticket or call 2200.",
+                "Northbridge IT Service Desk",
+            ],
+            "links": [],
+            "attachments": [
+                {"name": "Remote_Access_Guide.pdf", "size": "186 KB",
+                 "kind": "pdf"},
+            ],
+        },
+        "analysis": {
+            "disposition": "legitimate",
+            "family": None,
+            "why": "A genuine attachment from the service desk of record. The "
+                   "ransomware family's counterpart: an attachment is not a "
+                   "threat, while a macro-enabled workbook from an unfamiliar "
+                   "billing domain is a question.",
+            "establishes_context": ["servicedesk_contact"],
+        },
+    },
+    {
+        "id": "m-vendor-po-update",
+        "arrival": "scheduled",
+        "folder": "inbox",
+        "thread_id": "t-calderwood",
+        "unread": True,
+        "received": "+ later",
+        "order": 140,
+        "surface": {
+            "subject": "Calderwood Facilities - PO reference for CF-20411",
+            "from_name": "Ines Duarte",
+            "from_address": "ines.duarte@calderwood.example",
+            "reply_to": None,
+            "to": "aarti.venkatesh@northbridge.example",
+            "cc": "arjun.rao@northbridge.example",
+            "body": [
+                "Hello Aarti,",
+                "Your finance team asked us to quote the purchase order "
+                "reference on future statements. For CF-20411 that is "
+                "PO-NB-3391. Nothing else changes and no action is needed "
+                "from you.",
+                "Settlement details are as they have always been.",
+                "Ines Duarte\nAccount Manager, Calderwood Facilities Ltd",
+            ],
+            "links": [],
+            "attachments": [],
+        },
+        "analysis": {
+            "disposition": "legitimate",
+            "family": None,
+            "why": "The BEC family's counterpart: the real supplier, on the "
+                   "real domain, in the real thread, explicitly changing "
+                   "nothing about settlement. Reporting it is an "
+                   "over-suspicious response to routine work.",
+            "establishes_context": ["vendor_contact"],
+        },
+    },
+    {
+        "id": "m-facilities-notice",
+        "arrival": "scheduled",
+        "folder": "inbox",
+        "thread_id": None,
+        "unread": True,
+        "received": "+ later",
+        "order": 150,
+        "surface": {
+            "subject": "Lift 2 out of service Thursday morning",
+            "from_name": "Northbridge Facilities",
+            "from_address": "facilities@northbridge.example",
+            "reply_to": None,
+            "to": "all-staff@northbridge.example",
+            "body": [
+                "Lift 2 will be out of service from 07:00 until about 11:00 "
+                "on Thursday for its annual inspection. Lift 1 and the north "
+                "stairwell are unaffected.",
+                "Northbridge Facilities",
+            ],
+            "links": [],
+            "attachments": [],
+        },
+        "analysis": {
+            "disposition": "legitimate",
+            "family": None,
+            "why": "Ordinary workplace noise. It carries no decision, no "
+                   "evidence and no consequence -- which is exactly why it "
+                   "belongs here.",
+            "establishes_context": [],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -1241,6 +1404,14 @@ BROWSER_PAGES = {
         "location_id": "loc-shared",
     },
     "intranet.northbridge.example/it/maintenance": {
+        # A legitimate download, so that "this page offers a file" is not
+        # itself a signal. Both pages present the resource identically; what
+        # differs is the site it is on and the file it materialises.
+        "resources": [
+            {"id": "res-access-guide", "name": "Remote_Access_Guide.pdf",
+             "size": "186 KB", "kind": "pdf",
+             "label": "Reconnection guide"},
+        ],
         "title": "Maintenance calendar",
         "chrome": "internal",
         "kind": "portal",
@@ -1371,6 +1542,17 @@ BROWSER_PAGES = {
         "kind": "portal",
         "heading": "Calderwood Billing Services",
         "subheading": "Accounts and remittance",
+        # A downloadable resource, which is new in Batch 3 and is the second
+        # entry vector into the ransomware family. "Download" here means: the
+        # server materialises a row in the synthetic Downloads folder, through
+        # the same collision resolver a mail attachment uses. Nothing is
+        # fetched, no request leaves the process, no byte is written to disk,
+        # and the client sends this resource id -- never a filename or a path.
+        "resources": [
+            {"id": "res-rate-card", "name": "Calderwood_Rates_Q4.xlsm",
+             "size": "268 KB", "kind": "spreadsheet-macro",
+             "label": "Current rate card"},
+        ],
         "sections": [
             {"title": "Remittance", "items": [
                 "Aveley Trust Bank · sort code 23-08-71 · account "
