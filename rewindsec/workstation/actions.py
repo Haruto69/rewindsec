@@ -122,17 +122,27 @@ ACTION_SPECS = {spec.action_type: spec for spec in (
     _obs("browser.navigate", params={"url": ("url", True, MAX_URL)}),
     _con("browser.sign_in", params={"url": ("url", True, MAX_URL)}),
     _con("browser.sign_in_retry", params={"url": ("url", True, MAX_URL)}),
+    #: ``context`` names *which release-queue entry* on that page is being
+    #: settled -- the payment-context id the projection handed the client,
+    #: never an invoice, an occurrence or a decision. Optional: a client that
+    #: sends none settles the page's first outstanding entry, which is what
+    #: every single-entry payments page has always done. See
+    #: ``rewindsec.workstation.service._resolve_payment_context``.
     _con("browser.release_payment",
          params={"url": ("url", True, MAX_URL),
-                 "account": ("str", True, MAX_ACCOUNT_REF)}),
-    #: ``reconnect`` is new in Batch 3 and is deliberately in the same
-    #: allowlist as ``isolate``: putting the machine back on the network is a
-    #: consequential operational decision, not a settings toggle, and it is
-    #: recorded as one. It is narrow on purpose -- there is no network
-    #: management surface here, only the two things a person at a Service Desk
-    #: page can actually do.
+                 "account": ("str", True, MAX_ACCOUNT_REF),
+                 "context": ("str", False, MAX_RESOURCE_REF)}),
+    #: ``reconnect`` (Batch 3) and ``restore`` (Batch 4) are deliberately in
+    #: the same allowlist as ``isolate``: each is a consequential operational
+    #: decision, not a settings toggle, and each is recorded as one. Narrow on
+    #: purpose -- there is no network-management or IT-recovery surface here,
+    #: only the things a person at a Service Desk page can actually do.
+    #: ``restore`` is recovery, not containment: it is only meaningful once an
+    #: incident exists and has already been contained, and it never undoes
+    #: the incident itself -- see ``rewindsec.workstation.service._restore``.
     _con("browser.support_action",
-         params={"choice": ("enum", True, ("isolate", "raise", "reconnect"))}),
+         params={"choice": ("enum", True,
+                            ("isolate", "raise", "reconnect", "restore"))}),
     #: A download from a synthetic page. The client names the page and the
     #: *resource id* the projection gave it; it cannot name a filename, a
     #: path or an address to fetch, and nothing is fetched. The server decides

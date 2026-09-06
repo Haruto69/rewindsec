@@ -69,6 +69,37 @@ def candidates():
             prerequisites=(
                 el.Prereq(el.FACT_AVAILABLE, "org.vendor_contact"),
             )),
+        _candidate(
+            # Batch 4 review correction: a second, distinct BEC surface --
+            # a different real vendor (Meridian), so a session's payment-
+            # redirection exposure is not limited to one supplier
+            # relationship. Same OBSERVED-gating reasoning as the Calderwood
+            # candidate: a reply only threads onto a conversation the
+            # learner has actually opened.
+            #
+            # Batch 4 correction (content pipeline wiring): the family's
+            # recurring candidate. ``max_occurrences=2`` -- the first
+            # occurrence is the authored ``m-meridian-amend`` message above;
+            # a second occurrence targets a distinct pre-seeded mail row
+            # (``m-meridian-amend-o2``, its own decision pair ``d-bec3-*``)
+            # whose subject and opening wording vary deterministically from
+            # the ``content_variation`` stream at delivery time, while the
+            # supplier, the account of record and every other financial
+            # fact stay byte-identical to the first occurrence -- there is
+            # no second vendor here, only a second message about the same
+            # one. See ``rewindsec.training.delivery._deliver_mail`` and
+            # ``rewindsec.training.recurrence``. ``delivers_mail`` is
+            # deliberately unset for the same reason as the phishing
+            # candidate above: it would lock this candidate after the first
+            # occurrence, which is exactly the recurrence being added.
+            "cand-bec2-account-change", FAMILY, activity="mail",
+            delivery="mail", content_ref="m-meridian-amend",
+            hostile=True, weight=10, max_occurrences=2, cooldown_ms=50000,
+            streams=("threat_selection", "content_variation"),
+            prerequisites=(
+                el.Prereq(el.FACT_AVAILABLE, "org.meridian_account"),
+                el.Prereq(el.FACT_OBSERVED, "mail.m-meridian-invoice.body"),
+            )),
     )
 
 

@@ -114,7 +114,7 @@
         folder: 'inbox', selected: null, search: '', headers: false,
         linkShown: null, composing: null, draft: '', mobileDetail: false
       },
-      browser: { tabs: [], active: 0 },
+      browser: { tabs: [], active: 0, accountDraft: null },
       files: { location: null, selected: null, renaming: false },
       messages: { conversation: null, draft: '', mobileDetail: false },
       authenticator: { details: {} },
@@ -1083,45 +1083,62 @@
       + '</ul></section></div>';
   }
 
+  /* The release queue. One card per payment context the server sent -- a
+   * recurring supplier request raises a second queue entry against the same
+   * invoice of record, and each entry is released, and settles, on its own.
+   * The client sends back the context id it was given; it never decides which
+   * payment an action is about, and it holds no occurrence or decision id to
+   * decide it with. */
   function renderPayments(tab, page) {
     var invoice = page.invoice || {};
-    var released = SNAP.browser.payment_released;
-    var account = APP.browser.accountDraft !== undefined
-      && APP.browser.accountDraft !== null
-      ? APP.browser.accountDraft
-      : (SNAP.browser.payment_account || invoice.account_of_record || '');
-
-    if (released) {
+    var contexts = page.payment_contexts || [];
+    if (!contexts.length) {
       return '<div class="pw-site"><div class="pw-site-head">'
         + '<h1>' + esc(page.heading) + '</h1>'
-        + '<p>Instruction accepted.</p></div>'
-        + '<section class="pw-site-section"><h2>' + esc(invoice.reference) + '</h2><ul>'
-        + '<li>' + esc(invoice.supplier) + ' — ' + esc(invoice.amount) + '</li>'
-        + '<li>Released to ' + esc(released) + '</li>'
-        + '<li>Released by ' + esc(SNAP.learner.name) + '</li>'
-        + '</ul></section></div>';
+        + '<p>Nothing is awaiting release.</p></div></div>';
     }
-
     return '<div class="pw-site">'
       + '<div class="pw-site-head"><h1>' + esc(page.heading) + '</h1>'
       + '<p>' + esc(page.subheading) + '</p></div>'
-      + '<section class="pw-site-section"><h2>Awaiting release</h2>'
-      + '<div class="pw-card" style="max-width:32rem">'
-      + '<h3 style="margin-bottom:.4rem">' + esc(invoice.reference) + ' · '
-      + esc(invoice.supplier) + '</h3>'
-      + '<p class="pw-small pw-muted">Amount ' + esc(invoice.amount)
-      + ' · approved by ' + esc(invoice.approved_by) + '</p>'
+      + '<section class="pw-site-section"><h2>Release queue</h2>'
+      + contexts.map(function (context) {
+          return renderPaymentContext(page, context);
+        }).join('')
+      + '<p class="pw-hint" style="margin-top:.7rem">' + esc(page.note) + '</p>'
+      + '</section></div>';
+  }
+
+  function renderPaymentContext(page, context) {
+    if (context.released_account) {
+      return '<div class="pw-card" style="max-width:32rem">'
+        + '<h3 style="margin-bottom:.4rem">' + esc(context.queue_ref) + ' · '
+        + esc(context.reference) + ' · ' + esc(context.supplier) + '</h3>'
+        + '<ul class="pw-small">'
+        + '<li>' + esc(context.amount) + ' — instruction accepted</li>'
+        + '<li>Released to ' + esc(context.released_account) + '</li>'
+        + '<li>Released by ' + esc(SNAP.learner.name) + '</li>'
+        + '</ul></div>';
+    }
+    var draft = APP.browser.accountDraft || {};
+    var account = Object.prototype.hasOwnProperty.call(draft, context.id)
+      ? draft[context.id]
+      : (context.account_of_record || '');
+    return '<div class="pw-card" style="max-width:32rem">'
+      + '<h3 style="margin-bottom:.4rem">' + esc(context.queue_ref) + ' · '
+      + esc(context.reference) + ' · ' + esc(context.supplier) + '</h3>'
+      + '<p class="pw-small pw-muted">Amount ' + esc(context.amount)
+      + ' · approved by ' + esc(context.approved_by) + '</p>'
       + '<label class="pw-field" style="margin-top:.9rem">'
       + '<span class="pw-label">Settlement account</span>'
-      + '<input class="pw-input" id="pw-pay-account" value="' + esc(account) + '"'
-      + ' autocomplete="off"></label>'
+      + '<input class="pw-input" id="pw-pay-account-' + esc(context.id) + '"'
+      + ' value="' + esc(account) + '" autocomplete="off"></label>'
       + '<div class="pw-row">'
       + '<button type="button" class="pw-btn is-primary" data-pay-release="'
-      + esc(page.url) + '">Release payment</button>'
-      + '<button type="button" class="pw-btn" data-pay-reset="1">Restore account of record</button>'
-      + '</div>'
-      + '<p class="pw-hint" style="margin-top:.7rem">' + esc(page.note) + '</p>'
-      + '</div></section></div>';
+      + esc(page.url) + '" data-pay-context="' + esc(context.id)
+      + '">Release payment</button>'
+      + '<button type="button" class="pw-btn" data-pay-reset="'
+      + esc(context.id) + '">Restore account of record</button>'
+      + '</div></div>';
   }
 
   function renderSupport(page) {
@@ -1144,7 +1161,24 @@
             + 'Disconnect this workstation from the network</button>')
       + '<button type="button" class="pw-btn" data-support="raise">'
       + 'Raise an incident with the Service Desk</button>'
+      + (files && files.contained && !files.recovered
+          ? '<button type="button" class="pw-btn is-primary" data-support="restore">'
+            + 'Restore affected files from a verified backup</button>'
+          : '')
       + '</div>'
+      /* Contained, but recovery is a separate, later step -- see
+       * Architecture Spec v1.1 (Batch 4) S24. The button only appears once
+       * containment is real, so "restore" can never be the first thing a
+       * learner tries. */
+      + (files && files.contained && !files.recovered
+          ? '<p class="pw-note is-accent" style="margin-top:.7rem">'
+            + 'The incident is contained. Affected files have not been '
+            + 'restored yet.</p>'
+          : '')
+      + (files && files.recovered
+          ? '<p class="pw-note is-good" style="margin-top:.7rem">'
+            + 'Affected files were restored from a verified backup.</p>'
+          : '')
       /* Says what being off the network costs, without saying whether being
        * off it was the right call. The server decides that; this only
        * describes the state the workstation is actually in. */
@@ -1281,7 +1315,57 @@
             + file.preview.map(function (line) { return '<p>' + esc(line) + '</p>'; }).join('')
             + '</div>'
           : '')
+      + (file.document ? renderDocumentViewer(file.document) : '')
       + '</div></div>';
+  }
+
+  /* The read-only synthetic document viewer. Every field it renders comes
+   * from a server-owned ``rewindsec.content.schema.SyntheticDocument``
+   * projection whose leaf strings were already rejected by
+   * ``rewindsec.content.sanitize`` if they looked like markup -- but this
+   * still runs every value through ``esc()`` before it reaches the page, so
+   * nothing here ever interprets a document field as HTML. No iframe, no
+   * object/embed, no script, no external resource: it is plain escaped text
+   * inside plain container elements. */
+  function renderDocumentViewer(doc) {
+    var blocks = (doc.blocks || []).map(renderDocumentBlock).join('');
+    return '<div class="pw-docviewer">'
+      + '<div class="pw-docviewer-head">' + icon('doc')
+      + '<b>' + esc(doc.title) + '</b></div>'
+      + '<div class="pw-docviewer-body">' + blocks + '</div>'
+      + '</div>';
+  }
+
+  function renderDocumentBlock(block) {
+    if (block.type === 'heading') {
+      var tag = 'h' + Math.min(6, Math.max(4, 3 + (block.level || 2)));
+      return '<' + tag + '>' + esc(block.text) + '</' + tag + '>';
+    }
+    if (block.type === 'paragraph') {
+      return '<p>' + esc(block.text) + '</p>';
+    }
+    if (block.type === 'key_value') {
+      return '<dl class="pw-docviewer-kv">' + (block.pairs || []).map(function (pair) {
+        return '<dt>' + esc(pair[0]) + '</dt><dd>' + esc(pair[1]) + '</dd>';
+      }).join('') + '</dl>';
+    }
+    if (block.type === 'table') {
+      var head = '<tr>' + (block.headers || []).map(function (h) {
+        return '<th>' + esc(h) + '</th>';
+      }).join('') + '</tr>';
+      var body = (block.rows || []).map(function (row) {
+        return '<tr>' + row.map(function (cell) {
+          return '<td>' + esc(cell) + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      return '<div class="pw-docviewer-table"><table>' + head + body + '</table></div>';
+    }
+    if (block.type === 'list') {
+      return '<ul>' + (block.items || []).map(function (item) {
+        return '<li>' + esc(item) + '</li>';
+      }).join('') + '</ul>';
+    }
+    return '';
   }
 
   // =========================================================================
@@ -1910,10 +1994,18 @@
     if (hit) { send('browser.sign_in_retry', null, { url: hit.value }); return; }
 
     hit = closestData(event.target, 'data-pay-release');
-    if (hit) { releasePayment(hit.value); return; }
+    if (hit) {
+      releasePayment(hit.value,
+        hit.node.getAttribute('data-pay-context'));
+      return;
+    }
 
     hit = closestData(event.target, 'data-pay-reset');
-    if (hit) { APP.browser.accountDraft = null; render(); return; }
+    if (hit) {
+      if (APP.browser.accountDraft) { delete APP.browser.accountDraft[hit.value]; }
+      render();
+      return;
+    }
 
     hit = closestData(event.target, 'data-support');
     if (hit) { send('browser.support_action', null, { choice: hit.value }); return; }
@@ -2092,19 +2184,32 @@
     send('files.open', fileId);
   }
 
-  function releasePayment(url) {
-    var field = qs('#pw-pay-account');
+  function releasePayment(url, contextId) {
     var page = pageFor(url) || {};
-    var invoice = page.invoice || {};
-    var value = field ? field.value.trim() : (invoice.account_of_record || '');
-    var changed = value !== (invoice.account_of_record || '');
-    confirmDialog('Release ' + invoice.amount + ' for ' + invoice.reference + '?',
+    var contexts = page.payment_contexts || [];
+    var context = null;
+    for (var i = 0; i < contexts.length; i += 1) {
+      if (contexts[i].id === contextId) { context = contexts[i]; break; }
+    }
+    if (!context) { return; }
+    var field = qs('#pw-pay-account-' + cssEscape(context.id));
+    var value = field ? field.value.trim() : (context.account_of_record || '');
+    var changed = value !== (context.account_of_record || '');
+    confirmDialog('Release ' + context.amount + ' for ' + context.reference
+        + ' (' + context.queue_ref + ')?',
       changed
         ? 'The settlement account has been changed from the one held on file.'
         : 'The payment goes to the account of record.',
       function () {
-        send('browser.release_payment', null, { url: url, account: value });
+        send('browser.release_payment', null,
+          { url: url, account: value, context: context.id });
       });
+  }
+
+  /* Payment context ids are server-authored and match /^[a-z0-9-]+$/, but the
+   * selector is built from one anyway rather than trusted. */
+  function cssEscape(value) {
+    return String(value).replace(/[^A-Za-z0-9_-]/g, '');
   }
 
   /* The password field is never read, never serialised and never sent. What is
@@ -2250,7 +2355,11 @@
       else if (node.id === 'pw-url-input') { ensureTab().urlDraft = node.value; }
       else if (node.id === 'pw-dir-search') { APP.directory.search = node.value; render(); }
       else if (node.id === 'pw-msg-input') { APP.messages.draft = node.value; }
-      else if (node.id === 'pw-pay-account') { APP.browser.accountDraft = node.value; }
+      else if (node.id && node.id.indexOf('pw-pay-account-') === 0) {
+        if (!APP.browser.accountDraft) { APP.browser.accountDraft = {}; }
+        APP.browser.accountDraft[node.id.slice('pw-pay-account-'.length)] =
+          node.value;
+      }
       else if (node.id === 'pw-note-title' || node.id === 'pw-note-body') {
         queueNoteSave();
       }

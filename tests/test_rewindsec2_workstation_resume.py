@@ -233,7 +233,11 @@ def test_the_debrief_after_a_resume_reports_the_real_session(client,
     debrief = client.get("/prototype/api/session/debrief").get_json()["debrief"]
 
     assert debrief["decisions"], "no decision was recorded"
-    assert any(d["id"] == "d-phish-credentials" for d in debrief["decisions"])
+    # ``id`` is now the occurrence-scoped storage key (see
+    # rewindsec.workstation.consequences); ``decisionId`` is the semantic
+    # class every occurrence of a decision shares.
+    assert any(d["decisionId"] == "d-phish-credentials"
+              for d in debrief["decisions"])
     assert debrief["chains"], "no causal chain was recorded"
     assert debrief["chains"][0]["steps"], "the chain recorded no steps"
     assert debrief["counts"]["observed_facts"] > 0

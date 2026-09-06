@@ -185,7 +185,18 @@ def test_the_replaced_session_is_completed_not_destroyed(client, flask_app,
     # Every fact it recorded is still there.
     assert len(list(old.action_log.actions())) == len(
         before["action_log"]["actions"])
-    assert old.world.capture_state() == before["world"]
+    # Ending the session legitimately adds exactly one more fact since
+    # ``before`` was captured: the persisted, immutable Batch 4 scoring
+    # result (``rewindsec.scoring.state.finalize``), which the previous
+    # batch's numeric placeholder never wrote. Every mutation recorded before
+    # that point is untouched -- it is genuinely one more fact added, not a
+    # rewrite of history.
+    old_state = old.world.capture_state()
+    before_mutations = before["world"]["mutations"]
+    assert old_state["mutations"][:len(before_mutations)] == before_mutations
+    new_mutations = old_state["mutations"][len(before_mutations):]
+    assert [m["namespace"] for m in new_mutations] == ["scoring"]
+    assert new_mutations[0]["key"] == "result"
 
 
 def test_a_new_session_is_a_different_session(client, flask_app, worked):

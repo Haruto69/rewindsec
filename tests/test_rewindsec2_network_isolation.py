@@ -79,7 +79,17 @@ def unavailable(driver):
 
 
 def decisions(driver):
-    return set(driver.session().world.get_component(NS_DECISIONS))
+    """The semantic decision classes recorded this session.
+
+    Occurrence-scoped decisions (an MFA approval/denial, a shared-portal
+    credential submission) are stored under a composite ``<class>@<occurrence>``
+    key -- see ``rewindsec.workstation.consequences._record_id`` -- so this
+    reads the row's own ``decision_class`` field rather than the storage key,
+    keeping "was this decision class ever recorded" a one-line set membership
+    check regardless of how many occurrences recorded it.
+    """
+    return {state.get("decision_class", key) for key, state
+           in driver.session().world.get_component(NS_DECISIONS).items()}
 
 
 def suppressed(driver):
@@ -331,9 +341,13 @@ def test_containment_and_recovery_are_stored_as_two_different_things(tmp_path):
 
     entry = incident(driver.snapshot(), "inc-files")
     assert entry["contained"] is True
-    # Contained is the only claim made. There is no "recovered", no "resolved"
-    # and no "safe" flag for a later batch to confuse with it.
-    assert "recovered" not in entry
+    # Batch 4 introduces recovery as a genuinely separate fact from
+    # containment (Architecture Spec v1.1 S24): the field exists, but
+    # containing the incident does not, by itself, set it. Only the narrowly
+    # scoped restore workflow in ``rewindsec.workstation.service._restore``
+    # ever flips it -- see
+    # ``test_rewindsec2_workstation_recovery.py`` for that path.
+    assert entry["recovered"] is False
     assert "resolved" not in entry
 
 

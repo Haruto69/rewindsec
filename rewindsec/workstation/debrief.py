@@ -22,24 +22,28 @@ evidence model. That is what a debrief is. Nothing in
 :mod:`rewindsec.workstation.projection` may import from here, and nothing here
 is ever merged into a learner snapshot.
 
-What is deliberately not here
------------------------------
-A score. Scoring, its dimensions, its weights, its evidence-relevance model
-and its versioning are Batch 4. This module reports facts -- which decisions
-were taken, which consequences followed, which available evidence was actually
-inspected -- and the prototype results screen still computes its demonstration
-numbers from them in the browser, clearly marked as a demonstration. Those
-numbers are not RewindSec 2.0 scoring and must never be reported as such.
+Scoring
+-------
+Since Batch 4, ``document["scoring"]`` carries the real, server-derived
+result from :mod:`rewindsec.scoring` -- computed once, at session completion,
+and persisted immutably (see :mod:`rewindsec.scoring.state`). A session
+created before Batch 4 carries no scoring stamp and gets the explicit legacy
+projection instead; its historical demo numbers, if the old prototype
+presentation is still reachable, are not RewindSec 2.0 scoring and must never
+be reported as such.
 """
 
 from rewindsec.domain.enums import SessionStatus
+from rewindsec.scoring import state as scoring_state
 from rewindsec.workstation import clock
 from rewindsec.workstation.bootstrap import (NS_DECISIONS, NS_FILES,
                                              NS_INCIDENTS, NS_MAIL, NS_TASKS)
 from rewindsec.workstation.consequences import NS_CONSEQUENCE_MAP
 from rewindsec.workstation.content import index as ix
 from rewindsec.workstation.errors import ForbiddenActionError
-from rewindsec.workstation.projection import _evidence_fact_id, _evidence_source
+
+_evidence_fact_id = ix.evidence_fact_id
+_evidence_source = ix.evidence_source
 
 __all__ = ["debrief_document"]
 
@@ -86,14 +90,10 @@ def debrief_document(session):
             "available_facts": len(session.ledger.available_facts()),
             "observed_facts": len(session.ledger.observed_facts()),
         },
-        # Named so nobody can mistake it for a measured result.
-        "scoring": {
-            "engine": "none",
-            "note": "Batch 2 records facts only. The numbers on the results "
-                    "screen are an authored demonstration, computed in the "
-                    "browser from these facts. They are not RewindSec 2.0 "
-                    "scoring and are not evidence of anything.",
-        },
+        # The real, server-derived rubric result -- or the explicit legacy
+        # projection for a session that predates it. Computed once, at
+        # completion, and persisted immutably; never recomputed on a later GET.
+        "scoring": scoring_state.learner_view(session),
     }
 
 
@@ -233,12 +233,24 @@ def _find_step(chain, step_id):
 # ---------------------------------------------------------------------------
 
 def _decisions(session):
+    """One row per decision *record*, not per semantic decision class.
+
+    A recurring decision class (an MFA approval, a shared-portal credential
+    submission) can now be recorded more than once in a session -- once per
+    occurrence, see :mod:`rewindsec.workstation.consequences` -- so ``id``
+    here is the row's own storage key (unique per record) while
+    ``decisionId`` carries the semantic class those two (or more) rows share.
+    Everything that reads a decision's authored meaning (label, class,
+    family, dimensions, evidence model) still keys off ``decisionId``.
+    """
     rows = []
-    for decision_id, state in session.world.get_component(NS_DECISIONS).items():
+    for record_id, state in session.world.get_component(NS_DECISIONS).items():
+        decision_id = state.get("decision_class", record_id)
         definition = ix.DECISION_BY_ID.get(decision_id) or {}
         evidence = _evidence_state(session, decision_id)
         rows.append({
-            "id": decision_id,
+            "id": record_id,
+            "decisionId": decision_id,
             "label": definition.get("label", decision_id),
             # Authored ground truth. Legitimate here and nowhere else: this is
             # the explanation the learner has finished earning.
@@ -279,19 +291,24 @@ def _chains(session, decisions):
     still unfolding when the session ended shows the steps that actually
     happened and not the ones that were going to.
     """
-    by_decision = {}
+    # NS_CONSEQUENCE_MAP is keyed by the same occurrence-scoped record id
+    # ``_decisions`` exposes as ``id`` (see
+    # ``rewindsec.workstation.consequences._schedule_chain``), so a second
+    # occurrence's steps land under a distinct key here too and can never be
+    # attributed to the wrong occurrence's chain.
+    by_record = {}
     for key, consequence_id in session.world.get_component(NS_CONSEQUENCE_MAP).items():
-        decision_id, _, step_id = key.partition(":")
-        by_decision.setdefault(decision_id, []).append((step_id, consequence_id))
+        record_id, _, step_id = key.partition(":")
+        by_record.setdefault(record_id, []).append((step_id, consequence_id))
 
     chains = []
     for decision in decisions:
-        definition = ix.DECISION_BY_ID.get(decision["id"]) or {}
+        definition = ix.DECISION_BY_ID.get(decision["decisionId"]) or {}
         chain = ix.CHAIN_BY_ID.get(definition.get("chain"))
         if chain is None:
             continue
         steps = []
-        for step_id, consequence_id in by_decision.get(decision["id"], []):
+        for step_id, consequence_id in by_record.get(decision["id"], []):
             if not session.incidents.has_consequence(consequence_id):
                 continue
             consequence = session.incidents.get_consequence(consequence_id)
@@ -308,7 +325,8 @@ def _chains(session, decisions):
         steps.sort(key=lambda item: item["order"])
         chains.append({
             "chainId": chain["id"],
-            "decisionId": decision["id"],
+            "decisionId": decision["decisionId"],
+            "recordId": decision["id"],
             "title": chain.get("title", ""),
             "incidentId": chain.get("incident_id"),
             "startedAt": decision["at"],
@@ -326,6 +344,7 @@ def _incidents(session):
         key: {"id": key, "title": state.get("title", ""),
               "note": state.get("note", ""),
               "contained": bool(state.get("contained")),
+              "recovered": bool(state.get("recovered")),
               "openedAt": state.get("opened", "")}
         for key, state in session.world.get_component(NS_INCIDENTS).items()
     }

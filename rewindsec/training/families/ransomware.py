@@ -65,6 +65,34 @@ def candidates():
             prerequisites=(
                 el.Prereq(el.FACT_AVAILABLE, "org.servicedesk_contact"),
             )),
+        _candidate(
+            # Batch 4 review correction: a second, distinct ransomware lure
+            # -- an audit-checklist pretext instead of a rate card -- so a
+            # session's ransomware exposure is not limited to one one-shot
+            # message. Independent decisions (d-ransom2-*), independent
+            # opportunity, the same generic file-availability consequence
+            # model (chain-file-incident/chain-uncontained) the rate-card
+            # lure already uses.
+            #
+            # Batch 4 correction (content pipeline wiring): the family's
+            # recurring candidate. ``max_occurrences=2`` -- the first
+            # occurrence is the authored ``m-audit-checklist`` message
+            # above; a second occurrence targets a distinct pre-seeded mail
+            # row (``m-audit-checklist-o2``, its own decision pair
+            # ``d-ransom3-*``) whose subject, sender persona and opening
+            # line vary deterministically from the ``content_variation``
+            # stream at delivery time; the attachment converges on the same
+            # completely synthetic file-availability consequence model as
+            # every other macro lure. See
+            # ``rewindsec.training.delivery._deliver_mail`` and
+            # ``rewindsec.training.recurrence``. ``delivers_mail`` is
+            # deliberately unset for the same reason as the other two
+            # recurring candidates: it would lock this candidate after the
+            # first occurrence.
+            "cand-ransom-audit-checklist", FAMILY, activity="mail",
+            delivery="mail", content_ref="m-audit-checklist",
+            hostile=True, weight=10, max_occurrences=2, cooldown_ms=50000,
+            streams=("threat_selection", "content_variation")),
     )
 
 

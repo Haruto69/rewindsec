@@ -74,6 +74,7 @@ from rewindsec.domain.errors import DomainError
 from rewindsec.domain.session import SimulationSession
 from rewindsec.persistence.ports import (SessionNotFoundError,
                                          StaleRevisionError)
+from rewindsec.scoring import state as scoring_state
 from rewindsec.workstation import bootstrap, clock, consequences, worldops
 from rewindsec.workstation.bootstrap import (NS_AUTH_REQUESTS, NS_BROWSER,
                                              NS_DIRECTORY, NS_FILES,
@@ -83,7 +84,8 @@ from rewindsec.workstation.bootstrap import (NS_AUTH_REQUESTS, NS_BROWSER,
                                              AUTH_HISTORY_FACT,
                                              contact_callback_fact,
                                              contact_fact, conversation_fact,
-                                             file_fact, mail_attachment_fact,
+                                             file_fact, file_document_fact,
+                                             mail_attachment_fact,
                                              mail_body_fact, mail_header_fact,
                                              mail_link_fact, page_fact,
                                              prompt_fact)
@@ -179,6 +181,11 @@ class WorkstationService(object):
         # advanced; it survives only for sessions that were already half-played
         # when this batch landed. See ``training.state.engine_is_active``.
         training_engine.start(session, cause_event_id=start_event.event_id)
+        # Stamps this session with the scoring/rubric/evidence-model versions
+        # it will (eventually) be scored under. A session created before this
+        # call existed carries no stamp and is legacy for scoring purposes for
+        # its entire lifetime -- see ``rewindsec.scoring.state``.
+        scoring_state.bootstrap(session, cause_event_id=start_event.event_id)
         self._repository.create(session)
         return session_id
 
@@ -223,6 +230,12 @@ class WorkstationService(object):
         session.record_immediate_event(
             "session.ended", source=EventSource.SYSTEM,
             visibility=EventVisibility.INTERNAL)
+        # Finalize the real score now, once, while the factual state is
+        # complete but the session is still active -- ``mutate_world`` (which
+        # persisting the result goes through) requires it. Idempotent: ending
+        # an already-completed session (the branch above) never reaches this,
+        # and this call itself never regenerates a result that already exists.
+        scoring_state.finalize(session)
         session.complete()
         self._save(session, expected)
         return self._project(session)
@@ -526,15 +539,23 @@ class WorkstationService(object):
         session.observe_fact(fact_id, learner_action.action_id)
         return True
 
-    def _decide(self, session, decision_id, learner_action, where, mode_flags):
+    def _decide(self, session, decision_id, learner_action, where, mode_flags,
+               occurrence_key=None):
         """Record a decision, schedule its chain, and return any confirmation.
 
         The Practice-only confirmation is computed here, on the server, and
         travels back as a transient notice. In Simulation and Assessment the
         same decision produces the same world change and no commentary at all.
+
+        ``occurrence_key`` identifies which presented occurrence this
+        decision resolves, for the handful of decision classes that can
+        legitimately be recorded more than once in a session -- see
+        :mod:`rewindsec.workstation.consequences`. ``None`` (the default)
+        keeps every other decision's original one-shot-per-session semantics.
         """
         event_id = consequences.record_decision(
-            session, decision_id, learner_action.action_id, where, mode_flags)
+            session, decision_id, learner_action.action_id, where, mode_flags,
+            occurrence_key=occurrence_key)
         if event_id is None:
             return None
         if not mode_flags.get("explicit_confirmation"):
@@ -719,6 +740,15 @@ def _mail_open_link(service, session, action, learner_action, mode_flags):
     address is resolved here from the authored message. Nothing is fetched:
     "navigating" means recording that this synthetic page is now part of the
     learner's browsing history.
+
+    When the destination is a sign-in page, the mail that linked to it is
+    recorded as that page's current referrer (:func:`_portal_referrer_key`).
+    Two occurrences of a recurring phishing lure can share the byte-identical
+    look-alike portal -- see ``rewindsec.training.recurrence`` -- and this is
+    what lets :func:`_browser_sign_in` attribute a later credential
+    submission to whichever occurrence's message the learner actually
+    followed, rather than to whichever occurrence happened to be delivered
+    first.
     """
     _, record = _require_delivered_mail(session, action.target)
     index = action.params["index"]
@@ -727,6 +757,10 @@ def _mail_open_link(service, session, action, learner_action, mode_flags):
         raise UnknownTargetError("No such link.")
     href = links[index].get("href", "")
     url = _normalise_url(href)
+    page = ix.PAGE_BY_URL.get(url)
+    if page is not None and page.get("kind") == "signin":
+        worldops.set_browser_state(session, _portal_referrer_key(url),
+                                   action.target)
     _visit(session, url, learner_action, service)
     return {"kind": "navigate", "url": url}
 
@@ -748,8 +782,9 @@ def _mail_delete(service, session, action, learner_action, mode_flags):
     worldops.set_mail_field(session, action.target, folder="deleted",
                             unread=False)
     service._mark_resolved(session, action.target)
-    if action.target == "m-payroll-restructure" and ix.is_hostile_mail(action.target):
-        return service._decide(session, "d-phish-delete", learner_action,
+    decision_id = _DELETE_DECISION.get(action.target)
+    if decision_id and ix.is_hostile_mail(action.target):
+        return service._decide(session, decision_id, learner_action,
                                "Mail", mode_flags)
     return None
 
@@ -882,8 +917,19 @@ def _browser_sign_in(service, session, action, learner_action, mode_flags):
         return None
 
     worldops.set_browser_state(session, "signin:%s" % url, "submitted")
-    return service._decide(session, "d-phish-credentials", learner_action,
-                           "Browser", mode_flags)
+    decision_id = _CREDENTIAL_DECISION_BY_SIGNIN.get(signin_id, "d-phish-credentials")
+    # Which occurrence's message linked here, if any -- see
+    # ``_mail_open_link``. A page a learner reaches with no recorded
+    # referrer (typed directly, or reached before this tracking existed on a
+    # resumed session) falls back to the decision's original one-shot-per-
+    # session semantics, exactly as before occurrence scoping existed.
+    occurrence_key = session.world.get(NS_BROWSER, _portal_referrer_key(url))
+    return service._decide(session, decision_id, learner_action,
+                           "Browser", mode_flags, occurrence_key=occurrence_key)
+
+
+def _portal_referrer_key(url):
+    return "portal_referrer:%s" % url
 
 
 def _browser_sign_in_retry(service, session, action, learner_action, mode_flags):
@@ -894,18 +940,83 @@ def _browser_sign_in_retry(service, session, action, learner_action, mode_flags)
     return None
 
 
+def _resolve_payment_context(session, url, requested_id):
+    """Which release-queue entry a release action is settling.
+
+    Named explicitly by the client, the pair ``(url, context_id)`` is resolved
+    against the authored site map and refused if the page has no such entry --
+    a context id belonging to a *different* payments page never resolves, so
+    one supplier's release action can never settle another's queue line.
+
+    Named by nobody, the entry is the page's first outstanding one: the first
+    available context with no release recorded against it. That is what every
+    single-entry payments page has always done, and on the recurring Meridian
+    queue it means an unqualified release settles the release request that is
+    actually outstanding -- never one that has already been settled, so an
+    action taken about the second occurrence can never fall back onto the
+    first occurrence's already-resolved entry.
+
+    Falls back to the first available entry when every entry is already
+    settled, so the caller's idempotency check -- not this resolver -- is what
+    turns a retry into a no-op.
+    """
+    contexts = worldops.available_payment_contexts(session, url)
+    if not contexts:
+        raise UnknownTargetError("There is nothing awaiting release there.")
+    if requested_id:
+        context = ix.payment_context_on_page(url, requested_id)
+        if context is None or context not in contexts:
+            raise UnknownTargetError("There is no such payment awaiting release.")
+        return context
+    for context in contexts:
+        if session.world.get(
+                NS_BROWSER, worldops.payment_release_key(context["id"])) is None:
+            return context
+    return contexts[0]
+
+
 def _browser_release_payment(service, session, action, learner_action, mode_flags):
+    """Release one queued supplier payment.
+
+    Occurrence-scoped, since Batch 4 review. The page says which invoice of
+    record is being settled; the *payment context* says which presented
+    occurrence's release request is being settled, and it is the context --
+    not the page -- that carries the occurrence key the recorded decision, its
+    consequence chain and its scoring opportunity are all keyed to.
+
+    Idempotent per context: a retried release of the same queue entry changes
+    nothing and records nothing a second time, checked here against the
+    entry's own world row rather than left to ``already_decided`` alone, so a
+    retry to the account of record is as inert as a retry to a changed one.
+    A release of a *different* context is a different, independent decision
+    even when it is the same semantic decision class about the same invoice.
+    """
     url = action.params["url"]
     page = ix.PAGE_BY_URL.get(url)
     if page is None or page.get("kind") != "payments":
         raise UnknownTargetError("No such page.")
+    context = _resolve_payment_context(session, url, action.params.get("context"))
     invoice = page.get("invoice") or {}
     account = action.params["account"]
+
+    release_key = worldops.payment_release_key(context["id"])
+    if session.world.get(NS_BROWSER, release_key) is not None:
+        # Already settled. Nothing is mutated, no decision is recorded and no
+        # chain is scheduled -- a double-submitted release is one payment.
+        return None
+
+    worldops.set_browser_state(session, release_key, account)
+    # Retained for the snapshot shape the client has always had: the most
+    # recent release, whichever queue entry it settled. Nothing scores from
+    # it; the per-context rows above are the record.
     worldops.set_browser_state(session, "payment_released", account)
     worldops.set_browser_state(session, "payment_account", account)
+
     if account.strip() != str(invoice.get("account_of_record", "")).strip():
-        return service._decide(session, "d-bec-authorize", learner_action,
-                               "Browser", mode_flags)
+        decision_id = context.get("authorize_decision")             or page.get("authorize_decision", "d-bec-authorize")
+        return service._decide(session, decision_id, learner_action,
+                               "Browser", mode_flags,
+                               occurrence_key=context.get("occurrence_key"))
     worldops.raise_notification(
         session, kind="system", title="Payment released",
         body="%s . account of record" % invoice.get("reference", ""), opens=None)
@@ -973,6 +1084,8 @@ def _browser_support(service, session, action, learner_action, mode_flags):
         return _isolate(service, session, learner_action, mode_flags)
     if choice == "reconnect":
         return _reconnect(service, session, learner_action, mode_flags)
+    if choice == "restore":
+        return _restore(service, session, learner_action, mode_flags)
 
     worldops.raise_notification(
         session, kind="system", title="Incident raised",
@@ -1071,6 +1184,44 @@ def _isolate_legacy(service, session, learner_action, mode_flags):
     return None
 
 
+def _restore(service, session, learner_action, mode_flags):
+    """Restore synthetic files affected by a *contained* file incident.
+
+    The narrowly scoped Batch 4 recovery workflow (Architecture Spec v1.1
+    S24): available only once containment has already happened, and it does
+    not touch the incident itself -- it only restores files, and records the
+    separate fact that recovery happened. No real filesystem or Docker state
+    is touched; a "restore" here is a :class:`~rewindsec.domain.world
+    .WorldMutation` on the same synthetic file rows every other Files
+    operation uses.
+    """
+    incident = session.world.get(NS_INCIDENTS, "inc-files")
+    if incident is None:
+        return {"kind": "notice",
+                "text": "There is nothing to restore: no files are affected."}
+    if not incident.get("contained"):
+        return {"kind": "notice",
+                "text": "Contain the incident before restoring affected "
+                        "files -- disconnect from the network first."}
+    if incident.get("recovered"):
+        return {"kind": "notice",
+                "text": "The affected files have already been restored."}
+
+    restored = []
+    for file_id, state in session.world.get_component(NS_FILES).items():
+        if state.get("state") == "unavailable" and not state.get("deleted"):
+            worldops.set_file_state(session, file_id, "normal", note="")
+            restored.append(file_id)
+
+    worldops.set_incident_recovered(session, "inc-files")
+    worldops.raise_notification(
+        session, kind="system", title="Files restored",
+        body="%d file(s) restored from a verified backup." % len(restored),
+        opens={"app": "files"})
+    return service._decide(session, "d-ransom-recover", learner_action,
+                           "Service Desk", mode_flags)
+
+
 def _reconnect(service, session, learner_action, mode_flags):
     """Put the workstation back on the network.
 
@@ -1121,18 +1272,24 @@ def _files_open(service, session, action, learner_action, mode_flags):
         return None
     origin = state.get("origin_mail")
     if state.get("macro") and _from_hostile_origin(origin):
-        return service._decide(session, "d-ransom-open", learner_action,
+        decision_id = _RANSOM_OPEN_DECISION.get(origin, "d-ransom-open")
+        return service._decide(session, decision_id, learner_action,
                                "Files", mode_flags)
-    # There is no document viewer, so the workstation does not claim one.
-    #
-    # Batch 2 answered every open with "Opened in the document viewer.", which
-    # was untrue: nothing was rendered, nothing was parsed, and no such surface
-    # exists. A synthetic workstation may show a learner a synthetic document,
-    # but it may not tell them it did something it did not do -- the whole
-    # exercise depends on what is on screen being reliable. The safe
-    # read-only document viewer is Batch 4's, alongside the synthetic content
-    # work it needs; until then an open reports what the file *is*.
+
     service._observe(session, file_fact(action.target), learner_action)
+    # The read-only synthetic document viewer, if this file is bound to one:
+    # marking the fact observed is what makes ``document`` appear in the
+    # projection (``rewindsec.workstation.projection._files_view``) -- it was
+    # available the moment the file existed, but its content is inspection-
+    # only, exactly like a message's headers. ``_observe`` is a safe no-op
+    # when no such fact was ever introduced for this file.
+    if service._observe(session, file_document_fact(action.target), learner_action):
+        return None
+
+    # No structured document is bound to this file. What Batch 2 used to say
+    # here ("Opened in the document viewer.") was untrue -- nothing was
+    # rendered and no such surface existed. This is the honest fallback for a
+    # file that genuinely has no synthetic document behind it.
     detail = " . ".join(part for part in (
         state.get("size") or "", state.get("modified") or "") if part)
     worldops.raise_notification(
@@ -1140,6 +1297,17 @@ def _files_open(service, session, action, learner_action, mode_flags):
         body=("No preview available on this workstation. %s" % detail).strip(),
         opens=None)
     return None
+
+
+#: Which decision opening a hostile macro attachment resolves, keyed by the
+#: file's ``origin_mail``. Any origin not named here (including every
+#: ``web:`` origin, unchanged from before this table existed) keeps the
+#: original default -- adding a second lure must not change what the first
+#: one decides.
+_RANSOM_OPEN_DECISION = {
+    "m-audit-checklist": "d-ransom2-open",
+    "m-audit-checklist-o2": "d-ransom3-open",
+}
 
 
 def _from_hostile_origin(origin):
@@ -1257,6 +1425,18 @@ def _auth_inspect_history(service, session, action, learner_action, mode_flags):
 
 
 def _auth_resolve(service, session, action, learner_action, mode_flags, approved):
+    """Resolve one raised approval request, and record its own decision.
+
+    Occurrence-scoped by ``action.target`` -- the request id of the specific
+    :data:`NS_AUTH_REQUESTS` row being resolved, which is already what
+    :mod:`rewindsec.scoring.opportunities` uses as this request's own
+    ``occurrence_key``. The same authored prompt can legitimately be raised
+    more than once in a session (an unsolicited approval after an account
+    compromise, a re-authentication follow-up); each raised request is a
+    distinct opportunity, and scoping the decision by request id is what lets
+    a second request be independently approved or denied rather than being
+    silently refused as "already decided" the moment the first one was.
+    """
     state = _require_request(session, action.target)
     prompt_id = state["prompt_id"]
     prompt = ix.PROMPT_BY_ID[prompt_id]
@@ -1269,7 +1449,8 @@ def _auth_resolve(service, session, action, learner_action, mode_flags, approved
         decision_id = ("d-mfa-approve-hostile" if approved
                        else "d-mfa-deny-hostile")
         return service._decide(session, decision_id, learner_action,
-                               "Authenticator", mode_flags)
+                               "Authenticator", mode_flags,
+                               occurrence_key=action.target)
 
     # The learner's own remote-access sign-in. Resolving it settles the
     # browser page and belongs in their own approval history.
@@ -1287,7 +1468,8 @@ def _auth_resolve(service, session, action, learner_action, mode_flags, approved
                           note="Remote access session started.")
     decision_id = "d-mfa-approve-legit" if approved else "d-mfa-deny-legit"
     return service._decide(session, decision_id, learner_action,
-                           "Authenticator", mode_flags)
+                           "Authenticator", mode_flags,
+                           occurrence_key=action.target)
 
 
 def _auth_approve(service, session, action, learner_action, mode_flags):
@@ -1409,14 +1591,38 @@ def _session_acknowledge(service, session, action, learner_action, mode_flags):
 #: mapping is inspectable in one place.
 _REPORT_DECISION = {
     "m-payroll-restructure": "d-phish-report",
+    "m-benefits-verify": "d-phish2-report",
+    "m-benefits-verify-o2": "d-phish3-report",
     "m-rate-card": "d-ransom-report",
+    "m-audit-checklist": "d-ransom2-report",
+    "m-audit-checklist-o2": "d-ransom3-report",
     "m-invoice-amend": "d-bec-report",
     "m-invoice-confirm": "d-bec-report",
+    "m-meridian-amend": "d-bec2-report",
+    "m-meridian-amend-o2": "d-bec3-report",
 }
 
 _REPLY_DECISION = {
     "m-headcount": "d-task-headcount-done",
     "m-invoice-amend": "d-bec-reply",
+    "m-meridian-amend": "d-bec2-reply",
+    "m-meridian-amend-o2": "d-bec3-reply",
+}
+
+#: Deleting a hostile message without reporting it is still a (neutral)
+#: decision, but only for messages that author one -- most families do not.
+_DELETE_DECISION = {
+    "m-payroll-restructure": "d-phish-delete",
+    "m-benefits-verify": "d-phish2-delete",
+    "m-benefits-verify-o2": "d-phish3-delete",
+}
+
+#: Which decision a credential submission resolves, keyed by the hostile
+#: sign-in page's own ``signin_id`` -- not by url, since a second look-alike
+#: domain fronting the same lure would still be the same decision.
+_CREDENTIAL_DECISION_BY_SIGNIN = {
+    "portal-hostile": "d-phish-credentials",
+    "portal-hostile-2": "d-phish2-credentials",
 }
 
 #: Verification only counts as verification of something actually in front of
@@ -1430,6 +1636,8 @@ _VERIFY_BY_CONVERSATION = {
 _VERIFY_BY_CONTACT = {
     "dir-calderwood": ("m-invoice-amend", "d-bec-verify"),
     "dir-priya-menon": ("m-payroll-restructure", "d-phish-verify"),
+    "dir-sofia-lindqvist": ("m-benefits-verify", "d-phish2-verify"),
+    "dir-meridian": ("m-meridian-amend", "d-bec2-verify"),
 }
 
 
@@ -1473,6 +1681,8 @@ _CONFIRMATION_TEXT = {
                            "location, seconds after you signed in.",
     "d-ransom-isolate": "Taking it off the network first is the part most "
                         "people skip.",
+    "d-ransom-recover": "Contained, then restored - that's the full sequence, "
+                        "not just the first half of it.",
     "d-task-headcount-done": "Done - and it was a genuine request, which is "
                              "the other half of the job.",
 }

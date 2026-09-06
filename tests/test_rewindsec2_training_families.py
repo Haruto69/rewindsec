@@ -50,7 +50,12 @@ def assessment(tmp_path, name, focus="mixed"):
 
 
 def decisions(driver):
-    return set(driver.session().world.get_component(NS_DECISIONS))
+    """Semantic decision classes recorded, independent of occurrence scoping.
+
+    See the identical helper in ``test_rewindsec2_network_isolation.py``.
+    """
+    return {state.get("decision_class", key) for key, state
+           in driver.session().world.get_component(NS_DECISIONS).items()}
 
 
 def observed(driver, fact_id):
@@ -572,17 +577,16 @@ def test_no_score_is_computed_anywhere_in_this_batch(driver):
 
 def test_opening_an_ordinary_file_does_not_claim_a_viewer_that_does_not_exist(
         driver):
-    """Batch 2 answered every open with "Opened in the document viewer."
+    """A file with no bound synthetic document says so honestly.
 
-    Nothing was rendered, nothing was parsed, and no such surface existed. A
-    synthetic workstation may show a learner a synthetic document; it may not
-    tell them it did something it did not do, because the whole exercise
-    depends on what is on screen being reliable.
-
-    The real read-only document viewer is Batch 4's, alongside the synthetic
-    content work it needs. Until then an open reports what the file is.
+    Batch 2 answered every open with "Opened in the document viewer.", which
+    was untrue: nothing was rendered, nothing was parsed, and no such surface
+    existed. Batch 4 adds a real, read-only document viewer for files that
+    are actually bound to a structured synthetic document (see
+    ``test_rewindsec2_workstation_documents.py``) -- but a file with no
+    document still gets the honest fallback, not an invented one.
     """
-    driver.act("files.open", "f-ops-notes")
+    driver.act("files.open", "f-scratch")
     latest = driver.snapshot()["notifications"][0]
     assert "document viewer" not in latest["body"].lower()
     assert "no preview available" in latest["body"].lower()

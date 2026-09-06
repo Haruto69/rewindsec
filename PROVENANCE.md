@@ -426,6 +426,614 @@ plus `tests/training_helpers.py`. Existing Batch 2 suites that asserted
 fixed-timeline behaviour were replaced with stronger assertions of the new
 architecture rather than relaxed.
 
+### Batch 4: scoring, evidence, synthetic content pipeline, document viewer
+
+**Base commit:** `f38b9c5` (*Add deterministic training engine and threat
+families*). **Versions:** `rewindsec-scoring/v1`, `rewindsec-rubric/v1`,
+`rewindsec-evidence-model/v1` (`rewindsec/scoring/versions.py`).
+
+`rewindsec/scoring/` turns a completed session's own factual history into the
+real six-dimension result; `rewindsec/content/` is the safe synthetic content
+pipeline; the document viewer is a small addition to
+`rewindsec/workstation/` and `rewindsec/workstation/content/`.
+
+| Path | Role |
+|---|---|
+| `rewindsec/scoring/dimensions.py` | The six authoritative dimension ids, matching the `dimensions` vocabulary already authored on every decision in `workstation/content/scenario.py` since Batch 2/3. |
+| `rewindsec/scoring/opportunities.py` | The Opportunity model (review correction): every chance a session presented to demonstrate something, materialized from factual world state (a delivered message, a raised approval request, a contained incident) — never from a recorded decision. |
+| `rewindsec/scoring/evidence.py` | The Evidence Graph: deterministic, SHA-256-derived evidence ids. Walks every `Opportunity`; a resolved one contributes its decision's authored evidence, an ignored one contributes explicit negative evidence for every dimension it was relevant to — not only `security_judgment`. |
+| `rewindsec/scoring/rubric.py` | The authored policy: decision-class → valence, evidence weights, and one applicability predicate per dimension (the N/A rule; Recovery Quality's now keyed to a genuine recovery opportunity, not merely "an incident occurred"). |
+| `rewindsec/scoring/evaluator.py` | Pure aggregation: evidence → per-dimension score (deterministic integer rounding, no floating-point ambiguity) → overall. |
+| `rewindsec/scoring/result.py` | `ScoringResult`/`DimensionResult`: the internal artifact (`to_state`) and the permitted learner/debrief projection (`to_learner_view`), plus the human-competence disclaimer every result carries. |
+| `rewindsec/scoring/state.py` | Versioning at session creation (`bootstrap`), finalize-once persistence (`finalize`), and the legacy/versioned/unavailable three-way `learner_view`. |
+| `rewindsec/content/provenance.py` | Machine-readable source records. All `origin="internally_authored_synthetic"` — **no external phishing/security corpus is used by runtime content.** |
+| `rewindsec/content/sanitize.py` | The fail-closed sanitizer: rejects real-looking domains/emails/phone numbers, any HTML tag, `javascript:`, event-handler attributes, path traversal, credential-shaped strings, and control characters. |
+| `rewindsec/content/normalize.py`, `archetypes.py` | Reviewed-and-sanitized source → normalized feature → safe high-level archetype (document, mail, MFA), never a copy of anything real. |
+| `rewindsec/content/generate.py` | Deterministic id derivation (`derive_content_id`, SHA-256, never `hash()`) and variant choice from a caller-owned RNG stream — session-stream-shaped and tested as such, even though the shipped catalogue is static (see below). |
+| `rewindsec/content/bind.py` | Binds generated content to the one existing fictional organisation in `workstation/content/world.py` rather than inventing a second one. |
+| `rewindsec/content/catalog.py`, `schema.py` | The eight-document runtime catalogue and the closed `SyntheticDocument` block schema (`paragraph`/`heading`/`key_value`/`table`/`list`), sanitized at construction. |
+| `rewindsec/workstation/content/documents.py` | The workstation-side binding of file ids / mail-attachment origins / browser-download origins to a catalogue document id. |
+| `rewindsec/training/families/background.py::cand-bg-facilities-followup`, `rewindsec/training/delivery.py::_SUBJECT_VARIANTS` (review correction) | The first live training candidate wired to the content pipeline: a real, selectable mail whose subject is a deterministic `content_variation` draw and whose attachment resolves to a pipeline-generated document, reaching the mailbox and the document viewer through the same paths every other candidate and document use. |
+| `rewindsec/workstation/bootstrap.file_document_fact` | The Context Ledger fact carrying one file's document content — available when the file exists, observed only once opened. |
+| `rewindsec/workstation/service._restore` | The narrowly scoped recovery action (`browser.support_action` choice `"restore"`): only reachable once an incident is contained, restores affected file rows, and records the `d-ransom-recover` decision, without touching the incident's identity or causal history. |
+
+**Why the scoring dimensions and rubric are not a new invention.** The
+authored `class`/`dimensions` fields on every entry in
+`workstation/content/scenario.py::DECISIONS` were already present since
+Batch 2/3 and already used exactly the six dimension names this batch makes
+authoritative. The Evidence Graph is built primarily by reading those
+existing fields plus the existing `evidence_source`/`evidence_model`
+translation (moved from `workstation/projection.py` into
+`workstation/content/index.py` so both the projection and the scoring package
+read one shared vocabulary, never two that could drift).
+
+**Versioning and legacy sessions.** `scoring_state.bootstrap` stamps every
+session with its three versions at creation (`WorkstationService
+.start_session`), mirroring how `training.state` stamps the engine version.
+A session with no stamp — every session created before this batch — is
+unambiguously legacy for scoring for its entire lifetime, independent of when
+it happens to complete: `debrief_document`'s `scoring` block returns
+`{"available": false, "legacy": true, ...}` for it, never a retroactively
+invented rubric result and never the old `{"engine": "none"}` placeholder.
+A versioned session's result is computed once — at `end_session`, before the
+session transitions to `COMPLETED` (state mutation requires an active
+session) — and persisted under a dedicated `scoring` `WorldState` namespace;
+ending an already-completed session is a no-op that returns the stored
+result unchanged.
+
+**No external dataset.** Every archetype's provenance record is marked
+`internally_authored_synthetic`; none references or was derived from a real
+corpus, a real message, or a real organisation.
+
+**Opportunities are independent of learner actions (review correction).**
+The first cut of scoring derived the Evidence Graph directly from recorded
+decisions, which meant a hostile message, approval request or recovery step
+the learner never touched could silently produce no evidence at all —
+scoring it as a neutral 50, or in some cases leaving the dimension N/A, when
+a real, presented opportunity had in fact been ignored. `rewindsec/scoring
+/opportunities.py` corrects this: an `Opportunity` is now materialized from a
+fixed, hand-authored map of which decisions would resolve it — never from
+whether one actually was recorded. `evidence.py` walks every opportunity a
+session presented; an unresolved one now contributes explicit negative
+evidence for *every* dimension it was relevant to, derived from the union of
+its resolving decisions' own authored `dimensions`. This is what makes "the
+learner never touched it" and "there was nothing to touch" two
+distinguishable outcomes instead of both quietly producing no evidence.
+
+**Opportunity provenance survives mutable world state (second review
+correction).** The first cut of `build_opportunities` read *current*
+`WorldState` component snapshots (`get_component`) — sufficient for "what is
+available right now", but not, by itself, a defensible scoring record, since
+nothing stops the world changing after an opportunity was presented (a
+message deleted, an approval request resolved, an incident later recovered).
+It now walks `session.world.mutations()` — the world's own append-only,
+immutable audit log, already persisted and already restored byte-for-byte on
+every resume — and captures each opportunity at the *first* mutation that
+establishes it, using that mutation's own `sim_time_ms` (stamped when it
+actually happened). Every later mutation to the same mail/request/incident
+row (deleted, resolved, recovered) is never consulted again for that
+opportunity. No new namespace, no separate log to keep in sync, and no risk
+to the existing "one big time-step and many small ones reach the same world"
+determinism guarantee — an earlier version of this fix that persisted a
+parallel log via `mutate_world` on every save broke exactly that guarantee
+(`tests/test_rewindsec2_training_engine.py
+::test_one_long_advance_and_many_short_ones_agree`) and was replaced with
+this design instead. `tests/test_rewindsec2_scoring_opportunities.py`'s
+"opportunity provenance survives mutable state" section proves this directly:
+a resolved MFA prompt, a deleted phishing mail, a recovered incident, and a
+resume all leave the opportunity's id, time, dimensions and source
+byte-identical to what they were the moment it was first presented.
+
+**Containment and recovery are separate opportunities, not one decision's two
+tags.** `d-ransom-isolate`/`d-ransom-continue` were originally tagged with
+both `incident_response` and `recovery_quality` — meaning isolating alone
+could earn a high Recovery Quality score with nothing ever actually
+restored. Both decisions are now tagged `incident_response` only; a
+`recovery` opportunity is a separate `Opportunity` that exists only once
+containment has genuinely happened (mirroring `service._restore`'s own gate)
+and is resolved only by the distinct `d-ransom-recover` decision. Recovery
+Quality's applicability predicate (`rubric._recovery_opportunity_ever_existed`)
+now reads the incident's `contained` flag directly, not merely whether an
+incident occurred — an incident that is opened but never contained leaves
+Recovery Quality legitimately N/A (no recovery opportunity ever existed) and
+blames the correct dimension, Incident Response, instead.
+
+**Content breadth: live, multi-family, and no longer exhausted in ~5 minutes
+(second review correction).** The first correction pass added exactly one
+live background candidate and left every threat family at its original
+one-shot surface — the review correctly rejected this as "not Batch 5's job
+deferred, Batch 4's job undone." This pass adds a genuinely new, independently
+scored, live training candidate to **every** named family:
+
+* **Phishing** — `cand-phish-benefits-lure` delivers `m-benefits-verify`, a
+  benefits/HR-themed credential-harvest lure with its own decision quad
+  (`d-phish2-credentials/-report/-verify/-delete`), own hostile sign-in page
+  (`benefits-northbridge.example/portal/verify`), and own verification
+  contact (`dir-sofia-lindqvist`, an existing but previously
+  verification-inert Directory entry). Converges on the same generic
+  `chain-credentials`/`chain-reported-hostile` consequence model the payroll
+  lure already uses — one safe synthetic account-compromise outcome, not two.
+* **BEC** — `cand-bec2-account-change` delivers `m-meridian-amend`, a second
+  vendor relationship (Meridian Print Services, previously an unused
+  Directory entry) with its own decision quad (`d-bec2-*`), own payments page
+  (`.../finance/payments-meridian`), and own consequence chain
+  (`chain-payment-meridian`, cloned from `chain-payment` with Meridian's own
+  invoice/amount/account text so a released Meridian payment is never
+  described using Calderwood's numbers).
+* **Ransomware** — `cand-ransom-audit-checklist` delivers `m-audit-checklist`,
+  a compliance-audit pretext with its own decision pair (`d-ransom2-open/
+  -report`) that converges on the *same* `chain-file-incident`/
+  `chain-uncontained`/`inc-files` incident the rate-card lure uses — per the
+  review's own instruction, "all still converge on the same safe synthetic
+  consequence model," not a second parallel incident economy.
+* **MFA** — no new candidate was needed: Batch 3 already ships
+  `cand-mfa-after-compromise` (`max_occurrences=2`, its own cooldown), and
+  since each raised approval request is its own `NS_AUTH_REQUESTS` row, the
+  Batch 4 opportunity model (above) already tracks each occurrence as an
+  independent `prompt:<request_id>` opportunity. **Correction (occurrence-
+  scoped decisions, below): the earlier limitation that `d-mfa-approve-
+  hostile`/`d-mfa-deny-hostile` were recorded globally-once no longer holds.**
+  A second raised prompt now records its own, independently classified
+  decision, scoped by the request id that already distinguishes it as its own
+  opportunity.
+* **Background** — `cand-bg-standup-notes` delivers `m-standup-notes`, the
+  second previously-unwired archetype (`arche-mail-ordinary-team-update`),
+  alongside the first correction's `cand-bg-facilities-followup`.
+
+Generalized, not redesigned: the decision-dispatch tables `_REPORT_DECISION`,
+`_REPLY_DECISION`, `_VERIFY_BY_CONTACT`, `_DELETE_DECISION`, and two
+previously-hardcoded single-id checks in `_browser_sign_in` and `_files_open`
+(now `_CREDENTIAL_DECISION_BY_SIGNIN`/`_RANSOM_OPEN_DECISION`) were widened
+from one hardcoded id to a small lookup table with the original id as the
+only entry that mattered before — provably byte-identical behavior for the
+original three lures (`tests/test_rewindsec2_content_breadth.py
+::test_opening_the_original_rate_card_still_resolves_its_own_decision`), and
+now a second entry for the new one. No existing eligibility, weighting or RNG
+stream logic in `rewindsec/training/` changed.
+
+`tests/test_rewindsec2_content_long_horizon.py` is the acceptance test the
+review specified directly: over a 30-minute simulated horizon (with no
+forcing), a Mixed session sees at least 8 distinct delivered messages
+spanning at least two hostile families and at least one background surface;
+a Phishing-focused session sees both phishing lures; a BEC-focused session
+reaches the second vendor once its thread is read; a Ransomware-focused
+session sees both lures; and an MFA-focused session's raised-request count
+stays bounded by the authored occurrence caps (≤ 3), never unbounded.
+
+The remaining six mail/MFA archetypes in `rewindsec/content/archetypes.py`
+stay implemented, provenance-backed and unit-tested for deterministic
+generation but not yet wired into further live candidates — turning every
+one of them into its own independently-scored candidate (new decision ids,
+new evidence-source entries, new eligibility/cooldown tuning, in some cases a
+new consequence chain) is real, ongoing content-authoring work, not an
+architectural gap; see Known Limitations for what is explicitly left.
+
+**Document viewer.** A `SyntheticDocument` is plain server-owned structured
+data (title, kind, ordered blocks from a five-member closed vocabulary) with
+every leaf string already rejected by the sanitizer if it looked like markup.
+Its content fact follows the same available/observed discipline as every
+other inspection-only fact: introduced (available) when the file is seeded or
+downloaded, observed only once `files.open` succeeds and the file is not
+`unavailable`. The ransomware lure attachment (`m-rate-card`) is deliberately
+left unbound — opening it is still the consequential trigger for
+`d-ransom-open`, and the viewer never fabricates a document body standing in
+for it. Mail attachment downloads and Browser resource downloads both
+materialise through the one shared `worldops.add_downloaded_file`, so both
+share the same document binding and the same locked filename-collision
+resolver from Batch 2 (`report.pdf`, `report (1).pdf`, …) unchanged. The
+front end (`static/prototype/workstation.js`) renders every block with the
+same `esc()`-escaping string-building style the Files panel already used for
+its metadata and preview text — no `innerHTML` of raw document text, no
+iframe/object/embed, no external resource, no parser.
+
+**Recovery vs. containment, and the exact factual mutation.**
+`d-ransom-isolate` (Batch 3) remains containment, and — as of the review
+correction above — contributes only `incident_response` evidence, never
+`recovery_quality`. This batch's `d-ransom-recover` is a distinct, later,
+optional decision. `service._restore` refuses to run (returns a notice, no
+mutation, no decision) unless `world.get(NS_INCIDENTS, "inc-files")
+["contained"]` is true, and is idempotent (a second call, once
+`["recovered"]` is already true, is also a no-op notice). On success it:
+
+1. Walks every `NS_FILES` row; for each with `state == "unavailable"` and not
+   `deleted`, calls `worldops.set_file_state(session, file_id, "normal",
+   note="")`. That function's own mutation sets, on the row: `state`:
+   `"unavailable"` → `"normal"`; `note`: whatever the ransomware chain step
+   wrote → `""`; `display_name`: recomputed from the row's own immutable
+   `name` field (never from the locked `display_name`), which is what
+   silently drops the `.demo_locked` suffix the same function added when the
+   file first became unavailable — nothing strips a suffix by string
+   surgery, the display name is simply rederived from the untouched original
+   each time. Each such write is one `WorldMutation`, causally linked
+   (`cause_event_id`) to a `"file.state_changed"` event.
+2. Calls `worldops.set_incident_recovered(session, "inc-files")`, which
+   merges `recovered: True` into the incident row *alongside* — the merge is
+   `dict(current, recovered=True)` — its existing `contained`, `incident_id`,
+   `title` and `note` fields, none of which are touched.
+3. Records the `LearnerAction` (already recorded by the caller before
+   dispatch, per every action) and calls `service._decide(session,
+   "d-ransom-recover", learner_action, "Service Desk", mode_flags)`, which
+   writes one `NS_DECISIONS` row (`decision_id`, `action_id`, `at_ms`) —
+   the association between the recovery `LearnerAction` and the incident is
+   this decision row's own `action_id` field, not a separate link.
+
+Nothing here touches `session.incidents.consequences()`, the incident's
+`incident_id`, or any earlier chain step's record —
+`tests/test_rewindsec2_workstation_recovery
+::test_restore_does_not_close_or_delete_the_incident` asserts the
+consequence count and incident id are byte-identical before and after.
+Recovery Quality evidence comes only from this factual opportunity/decision
+pair, never from the `recovered` flag being read directly by the rubric.
+
+**Active-session secrecy.** Nothing under this batch's code is reachable from
+`learner_snapshot`: `rewindsec/scoring/` is never imported by
+`workstation/projection.py`, and the `scoring` `WorldState` namespace is not
+named in its allowlist. `tests/test_rewindsec2_scoring_leakage.py` walks the
+whole active-session document (including an Assessment attempt mid-chain) and
+asserts no scoring field of any kind is present, then separately asserts the
+completed-session debrief projection carries only the six permitted fields
+per dimension.
+
+Rules for anything added here:
+
+* **Pure scoring.** Nothing under `rewindsec/scoring/` may import Flask,
+  SQLAlchemy, or any UI-facing module. It depends on domain types and on the
+  authored decision/evidence vocabulary in `workstation/content/`
+  (deliberately treated as stable "training metadata" for this purpose);
+  nothing under `rewindsec/training/` depends on it.
+* **Offline, deterministic content pipeline.** Nothing under
+  `rewindsec/content/` makes a network call, calls an LLM, or reads a real
+  external dataset. Every id is SHA-256-derived from stable material, never
+  `hash()`. `rewindsec/content/` never imports `rewindsec/workstation/`; the
+  binding direction is one-way (`workstation/content/documents.py` imports
+  from `rewindsec/content/`, not the reverse).
+* **Fail-closed sanitization.** An unreviewed or unsanitized source can never
+  reach generation (`ProvenanceRecord.may_generate`); an unsafe string is
+  rejected outright by `rewindsec/content/sanitize.py`, never silently
+  cleaned.
+* **Scoring never leaks mid-attempt.** No dimension score, evidence weight,
+  opportunity class, or expected action reaches `learner_snapshot`, in any
+  mode, at any point before the session completes.
+* **Finalize once.** A completed session's persisted result never changes
+  because the rubric code on disk later changes, and ending an
+  already-completed session never recomputes or duplicates it.
+
+Tests added: `tests/test_rewindsec2_scoring_evaluator.py` (all six dimensions,
+N/A semantics, spam/dedup resistance, causal separation of a bad decision from
+a good recovery, determinism, score bounds — updated for the opportunity-model
+correction: containment alone no longer earns Recovery Quality, an
+uncontained incident is negative Incident Response and N/A Recovery Quality,
+not the reverse), `tests/test_rewindsec2_scoring_opportunities.py` (review
+correction: ignored-but-presented hostile MFA/containment/recovery stay
+applicable and score poorly rather than going N/A or neutral; an absent
+recovery opportunity is legitimately N/A; unrelated actions — viewing, not
+calling, a Directory record — earn no credit),
+`tests/test_rewindsec2_scoring_leakage.py` (active-session and Assessment
+secrecy, the permitted debrief projection, finalize idempotency, the legacy
+projection), `tests/test_rewindsec2_content_pipeline.py` (adversarial
+sanitizer inputs, provenance/review gating, deterministic id derivation
+independent of `hash()`, stream-independence, catalogue safety),
+`tests/test_rewindsec2_content_runtime_wiring.py` (review correction: the new
+live candidate delivers real mail with a deterministic subject variant, its
+attachment resolves to a pipeline-generated document, the subject variant is
+stable across a resume, and content-variation draws never perturb
+threat-selection/timing/consequence streams),
+`tests/test_rewindsec2_workstation_documents.py` (available-vs-observed for
+document content, safe rendering, Mail/Browser download integration, filename
+collisions, the ransomware-unavailable state),
+`tests/test_rewindsec2_workstation_recovery.py` (prerequisites, idempotency,
+no rewind of the incident/causal graph, the resulting Recovery Quality score,
+and — added for the review correction — containment/recovery each surviving
+an independent save/resume boundary), `tests/test_rewindsec2_content_breadth
+.py` (second review correction: each new phishing/BEC/ransomware surface is
+live in the training catalogue, independently scored, cannot be resolved by
+acting on a different surface, and the generalized decision-dispatch tables
+leave the three original lures' own decisions byte-identical), and
+`tests/test_rewindsec2_content_long_horizon.py` (the review's own long-horizon
+acceptance test: meaningfully varied delivered content over 30 simulated
+minutes, at least two hostile families in one Mixed session, both lures
+reachable in a family-focused session, and MFA request counts staying
+bounded by the authored occurrence caps). Existing suites that asserted the
+pre-Batch-4 contract (`"recovered" not in entry`, the placeholder
+`{"engine": "none"}` debrief block, the Batch 2 "no document viewer" behaviour
+on a file this batch now binds one to, and an exact-equality world-state
+comparison across `end_session`) were replaced with stronger assertions of
+the Batch 4 contract, not relaxed.
+
+**Explicitly out of scope, and still fixture-backed or absent:** trainer
+attempt records, students, groups, assessments and assignment provenance
+(Batch 5); Docker-backed technical ransomware state (Batch 6). Scoring
+integration with Trainer records is deliberately not implemented — a
+completed session's persisted `ScoringResult` is the artifact Batch 5 will
+associate with a Student/Assessment/Attempt, not something this batch reaches
+into the (still fixture-backed) trainer console to display. **Content
+breadth remains Batch 4's responsibility, not Batch 5's**, and is left
+genuinely incomplete in two specific, narrow ways rather than deferred
+wholesale: (1) six of the nine authored mail/MFA archetypes are not yet
+wired into their own live candidate — each remaining one is a real
+content-authoring task (decision quad, evidence-source entries, eligibility
+tuning, in some cases a new consequence chain), not an architecture gap, and
+the pattern this batch established for the three it did wire is the template
+for finishing the rest. (2) is resolved — see "Occurrence-scoped decision and
+evidence provenance for recurring opportunities" below: MFA's second-
+occurrence decisions are no longer recorded globally-once, neither is a
+credential submission through a lure's second, generated occurrence, and —
+see "Occurrence-scoped BEC payment authorization" below — neither is a
+payment released against a recurring BEC occurrence's own release request.
+Every recurring family's consequential outcome is occurrence-scoped; none of
+it is deferred to Batch 5 or Batch 6.
+
+**Live threat content now uses the deterministic runtime content pipeline for
+bounded recurring variation (third review correction).** The second
+correction (above) gave every threat family a genuinely new live candidate,
+but each one was still a single authored, one-shot surface — the pipeline
+built in this batch (`rewindsec.content.generate.choose_variant`/
+`derive_content_id`) had exactly one production consumer
+(`cand-bg-facilities-followup`'s subject-line variant) and the mail/MFA
+archetype tables remained reserved, unconsumed surface area. This correction
+wires the pipeline into an actual *recurring* runtime surface for one live
+candidate in each of phishing, BEC and ransomware, plus the MFA family's
+already-recurring candidate, via the new
+`rewindsec.training.recurrence` module:
+
+* **Recurring candidates and caps** — `cand-phish-benefits-lure`,
+  `cand-bec2-account-change` and `cand-ransom-audit-checklist` each gained
+  `max_occurrences=2` (from 1) and a `cooldown_ms`; `cand-mfa-after-compromise`
+  already had `max_occurrences=2`. Candidate selection is unchanged: the
+  Batch 3 engine still draws which candidate fires, and when, from
+  `threat_selection`/`background` alone: `rewindsec.training.recurrence` runs
+  only *after* a candidate is selected, and only reads the candidate's own
+  persisted occurrence count (never randomness) to decide which physical mail
+  id or notification wording to use.
+* **Occurrence 0 unchanged, occurrence 1 generated** — a recurring
+  candidate's first occurrence is exactly its original authored message
+  (unchanged decision quad, unchanged opportunity). Its second occurrence
+  targets a second, distinct, pre-seeded mail row (`m-benefits-verify-o2`,
+  `m-meridian-amend-o2`, `m-audit-checklist-o2`) with its own small decision
+  pair/triple (`d-phish3-*`, `d-bec3-*`, `d-ransom3-*`) and its own
+  opportunity in `rewindsec.scoring.opportunities`, whose subject, sender
+  persona and opening line are chosen deterministically at delivery time from
+  `session.rng.stream(STREAM_CONTENT_VARIATION)` via
+  `generate.choose_variant`, with a stable id from `generate.derive_content_id
+  (session.session_id, candidate_id, occurrence)` — never `hash()`. MFA has no
+  second physical mail id — the same authored prompt is legitimately raised
+  twice — so its recurrence instead varies the arrival notification's wording
+  and the authenticator's displayed application label
+  (`worldops.create_auth_request`'s new `app_override`/`notification_body`
+  parameters); the inspectable device/location/network detail behind
+  "Details" is untouched, exactly as authored.
+* **Underlying facts never vary** — the BEC second occurrence keeps the exact
+  vendor, bank, sort code and account number the first occurrence already
+  established (this is a second message about the same fraud, not a second
+  fabricated vendor); the ransomware second occurrence converges on the same
+  synthetic file-availability consequence model (`chain-file-incident`,
+  reused, not a second incident); the phishing second occurrence's link
+  targets the byte-identical look-alike portal the first occurrence already
+  uses, and a credential submission through either one still records the
+  original `d-phish2-credentials` — there is one lure identity here, followed
+  up on, not two.
+* **Persistence and RNG isolation** — the generated overrides
+  (`subject_override`, `from_name_override`, `opening_line_override`,
+  `content_variation_id`, and MFA's `app_override`/`content_variation_id`) are
+  written through the existing `worldops.set_mail_field`/
+  `worldops.create_auth_request` world mutations, so they are part of the
+  session's ordinary persisted snapshot: nothing is regenerated from the
+  current RNG position on a GET, a resume replays the exact same stored
+  override values, and the one extra `content_variation` draw a second
+  occurrence makes cannot perturb `threat_selection`, `timing`, `background`
+  or `consequence` — each is its own named stream, exactly as the first
+  correction's subject-variant mechanism already proved.
+* **Scoped narrower than a full decision quad, deliberately** — each
+  generated second occurrence carries report/delete (phishing), report/reply
+  (BEC) or report/open (ransomware) as its own tracked opportunity, not the
+  full four-decision shape the first occurrence has. **Correction (occurrence-
+  scoped decisions, below): phishing's "credentials" outcome, reached through
+  the same reused portal both occurrences link to, is now tracked as part of
+  the second occurrence's own opportunity too** — `d-phish2-credentials` is
+  the same semantic decision class either occurrence resolves (there is one
+  lure identity here, not two), but which occurrence a submission counts
+  against is now resolved from provenance (which mail's link the learner
+  actually followed), not left untracked. **Correction (occurrence-scoped BEC
+  payment authorization, below): BEC's `authorize` outcome is now
+  occurrence-scoped too.** The earlier limitation — that `d-bec2-authorize`
+  remained a single shared decision point because there was only one Meridian
+  payments page — no longer holds: recurring BEC payment decisions are
+  occurrence-scoped exactly like the other recurring families, and a second
+  presented BEC occurrence produces its own consequential payment decision,
+  its own world mutation and its own consequence provenance.
+
+New file: `rewindsec/training/recurrence.py`. Changed: the three families'
+own candidate modules (recurrence gating), `rewindsec/training/delivery.py`
+(occurrence resolution), `rewindsec/workstation/worldops.py`
+(`create_auth_request`'s new optional parameters), `rewindsec/workstation
+/projection.py` (`_message_view`/`_authenticator_view` prefer the new
+overrides, mirroring the existing `subject_override` pattern),
+`rewindsec/workstation/content/world.py` (the three new mail rows),
+`rewindsec/workstation/content/scenario.py` (the six new decisions),
+`rewindsec/workstation/content/index.py` (`_EVIDENCE_SOURCE` entries),
+`rewindsec/workstation/service.py` (report/delete/reply/ransom-open decision
+tables), and `rewindsec/scoring/opportunities.py` (`_MAIL_RESOLUTIONS`
+entries — new, non-overlapping decision ids, so no opportunity can ever be
+double-resolved by the same recorded decision). New tests:
+`tests/test_rewindsec2_content_recurrence.py`.
+
+**Occurrence-scoped decision and evidence provenance for recurring
+opportunities (fourth review correction).** The third correction (above) gave
+phishing, BEC and ransomware a second, generated occurrence each with its own
+opportunity, but two specific decision classes stayed unsafe against it: MFA's
+hostile approve/deny decisions were recorded globally-once per session
+(`consequences.already_decided` keyed purely by decision id), so a second
+raised prompt could never be independently resolved once the first had been
+answered; and the two occurrences of the benefits phishing lure share a
+byte-identical look-alike portal, so a credential submission through *either*
+one recorded the same global decision, meaning the second occurrence's own
+opportunity could only ever show "ignored", never a genuine credential
+outcome. A decision from occurrence 1 could therefore, in effect, be read as
+resolving occurrence 2.
+
+`rewindsec.workstation.consequences.record_decision`/`already_decided` now
+take an optional `occurrence_key`. Storage is unchanged for every decision
+this architecture has always treated as one-shot for the whole session
+(`occurrence_key=None` keeps the bare decision id as the `NS_DECISIONS` row
+key, byte-identical to before); a caller that passes an `occurrence_key` gets
+a distinct row per occurrence (`"<decision_id>@<occurrence_key>"`), with the
+row itself carrying both the semantic `decision_class` and the
+`occurrence_key` so every reader can recover "what kind of decision" and
+"which occurrence" independent of how the row happens to be keyed. Two call
+sites now pass one: `service._auth_resolve` scopes every MFA
+approve/deny decision by the resolved request's own id (already the
+opportunity's own `request_id`); `service._browser_sign_in` scopes a
+credential decision by whichever mail's link the learner actually followed to
+reach the sign-in page (tracked by `_mail_open_link` as that page's current
+referrer). A page reached with no recorded referrer — typed directly, or an
+in-flight session predating this correction — falls back to the original
+unscoped, one-shot-per-session behaviour, so no existing one-shot decision's
+semantics changed. Consequence-chain bookkeeping
+(`NS_CONSEQUENCE_MAP`, causal-parent lookups) is keyed by the same
+occurrence-scoped record id, so two occurrences of the same recurring chain
+(both open the same `inc-account` incident, reused rather than reopened)
+can never have their steps' causal-parent links cross-contaminate.
+
+`rewindsec.scoring.opportunities.Opportunity` gained an `occurrence_key`
+field — the mail id for a mail opportunity, the request id for a prompt,
+`None` for the two opportunity types that never recur in a session
+(containment, recovery). `rewindsec.scoring.evidence.build_evidence` matches
+a resolving decision against the *specific* `(decision_id, occurrence_key)`
+pair an opportunity presents, falling back to the legacy unscoped pair only
+when no occurrence-scoped record exists (and consuming that fallback match at
+most once, so one unscoped record can never "resolve" more than one
+occurrence). `_decision_evidence`'s emitted evidence is now keyed by the same
+occurrence-scoped record id too (`decision:<record_id>`, not
+`decision:<decision_id>`) — the fix that closes the last gap: without it, two
+occurrences resolving the same decision *class* would still merge their
+Tier 1 evidence into one colliding id and one colliding `opportunity_id`,
+even after the resolution-matching step above told them apart correctly.
+`m-benefits-verify-o2`'s `_MAIL_RESOLUTIONS` entry now includes
+`d-phish2-credentials`, since a credential submission through the second
+occurrence is now independently trackable.
+
+`rewindsec/workstation/debrief.py`'s decision rows changed shape to match:
+`id` is now the row's own (occurrence-scoped) storage key, and a new
+`decisionId` field carries the semantic class every occurrence of a decision
+shares — everything that reads a decision's authored meaning (label, class,
+family, dimensions, evidence model, its causal chain) keys off `decisionId`,
+never `id`. `static/prototype/results.js`'s browser-side demonstration
+scoring (explicitly not real RewindSec 2.0 scoring; see the Batch 2 note
+above) was updated to match on `decisionId` where it falls back to `id` for
+fixture data that carries no `decisionId` at all, so its exact-match checks
+(`d-mfa-deny-legit`, `-report` suffix matching) do not silently stop firing
+for a real, occurrence-scoped session.
+
+Changed: `rewindsec/workstation/consequences.py` (`_record_id`, the
+`occurrence_key` parameter, occurrence-scoped `NS_CONSEQUENCE_MAP` keys),
+`rewindsec/workstation/service.py` (`_decide`'s `occurrence_key` parameter,
+`_auth_resolve`, `_browser_sign_in`, `_mail_open_link`'s new referrer
+tracking), `rewindsec/scoring/opportunities.py` (`Opportunity.occurrence_key`,
+the `m-benefits-verify-o2` resolution entry), `rewindsec/scoring/evidence.py`
+(`_decision_records`, `_decision_evidence`, the occurrence-aware resolution
+match in `build_evidence`), `rewindsec/workstation/debrief.py` (`_decisions`,
+`_chains`), `static/prototype/results.js`. New tests:
+`tests/test_rewindsec2_scoring_occurrence_provenance.py`. Updated:
+`tests/test_rewindsec2_network_isolation.py`,
+`tests/test_rewindsec2_training_families.py`,
+`tests/test_rewindsec2_workstation_recovery.py` (their shared `decisions()`
+helper now reads a row's `decision_class` rather than assuming the storage
+key is the semantic class), `tests/test_rewindsec2_workstation_resume.py`
+(one assertion now reads `decisionId`).
+
+---
+
+**Occurrence-scoped BEC payment authorization (fifth review correction).**
+The fourth correction (above) scoped MFA approvals and phishing credential
+submissions to the occurrence that produced them, but left BEC's most
+consequential outcome — releasing a supplier payment to an account that
+arrived by mail — as a single shared decision point per surface. The Meridian
+relationship is the one BEC surface that recurs
+(`cand-bec2-account-change`, `max_occurrences=2`), and its second occurrence
+had report and reply decisions of its own but no authorize path at all: one
+payments page, one release button, one `d-bec2-authorize` the whole session
+could record exactly once. A learner who released the payment on the first
+occurrence had no consequential payment decision left to make on the second,
+which is not a recurring opportunity.
+
+A payments page is now modelled as a **release queue**, and each entry in it
+is a *payment context*: a stable id (`pay-mp-7734-r1`/`-r2`), its own queue
+reference (`RQ-4482`/`RQ-4519`), the presented BEC occurrence it belongs to,
+and the authored decision it records. Both Meridian entries settle the *same*
+invoice of record — MP-7734, Meridian Print Services, £612.40, Bramwell Trust
+ending 7729 — and both authorize through the *same* semantic decision class,
+`d-bec2-authorize`: releasing a supplier payment to an account that arrived by
+mail is the same mistake the second time, and the second occurrence is a
+follow-up chase on one fraud, not a second fabricated supplier or a second
+invented invoice (the same rule the recurrence correction already applies to
+`rewindsec/training/recurrence.py`'s variant tables). What is
+occurrence-specific is the *release request*, and it is the release request
+that scopes everything downstream. There is no second Browser application and
+no second payments subsystem: one authored table, one generic handler.
+
+* **Decision scoping** — `browser.release_payment` takes an optional
+  `context` parameter naming the queue entry being settled (the id the
+  projection handed the client — never an invoice, an occurrence or a decision
+  id). `service._resolve_payment_context` resolves the `(url, context_id)`
+  pair against the authored site map, refusing a context that belongs to a
+  different payments page, and passes the context's `occurrence_key` to
+  `_decide`, so the recorded row is
+  `d-bec2-authorize@m-meridian-amend-o2` rather than the bare class. A client
+  naming no context settles the page's first *outstanding* entry — what every
+  single-entry payments page has always done, and never an entry already
+  settled, so an unqualified action about the second occurrence can never fall
+  back onto the first occurrence's resolved one.
+* **Only what has actually been raised** — the second entry carries
+  `requires_mail: m-meridian-amend-o2` and does not exist, in the projection
+  or in the handler, until that occurrence's message has actually been
+  delivered. A learner cannot settle a payment nothing in their day raised,
+  and the queue never announces a message the mailbox has not.
+* **World mutations and causal provenance** — release state moved from a
+  single page-wide `payment_released` flag to one `payment_released:<context>`
+  row per queue entry (`worldops.payment_release_key`), so two occurrences
+  produce two distinct payment mutations. Each authorization records its own
+  decision event, schedules its own `chain-payment-meridian` run, and writes
+  its own occurrence-scoped `NS_CONSEQUENCE_MAP` rows — the causal chain is
+  candidate/archetype → occurrence id → mail and payment context → scoring
+  opportunity → learner action → semantic decision class → occurrence key →
+  payment world mutation → consequence. Both runs open the same
+  `inc-payment-meridian` incident (reused, not reopened: one supplier, one
+  invoice, one fraud) with distinct consequence records under it, exactly as
+  the fourth correction already established for recurring chains.
+* **Idempotency** — a retried release of the same context mutates nothing and
+  records nothing a second time, checked against that entry's own world row
+  before any mutation, so a retry to the account of record is as inert as a
+  retry to a changed one. A release of a *different* context is a valid
+  independent decision even though it is the same semantic class about the
+  same invoice. Stale-revision protection is untouched.
+* **Scoring and evidence** — `m-meridian-amend-o2`'s `_MAIL_RESOLUTIONS` entry
+  now includes `d-bec2-authorize`, so authorizing while resolving the second
+  occurrence resolves the second occurrence's opportunity. The fourth
+  correction's exact `(decision_id, occurrence_key)` matching is what keeps
+  the two apart: `d-bec2-authorize@m-meridian-amend` can never resolve the
+  second occurrence's opportunity, or vice versa, and each occurrence's
+  evidence lands in its own `decision:<record_id>` bucket. The Calderwood
+  surface is scoped the same way (`occurrence_key: m-invoice-amend`) even
+  though it never recurs, so there is one code path rather than two.
+* **No leakage** — a projected queue entry carries only `id`, `queue_ref`,
+  `reference`, `supplier`, `amount`, `approved_by`, `account_of_record` and
+  `released_account`. `authorize_decision`, `occurrence_key` and
+  `requires_mail` stay server-side; the client sends back the context id and
+  the server recovers the rest.
+
+Changed: `rewindsec/workstation/content/world.py` (`payment_contexts` on both
+payments pages), `rewindsec/workstation/content/index.py`
+(`PAYMENT_CONTEXT_BY_ID`, `payment_contexts_for_page`,
+`payment_context_on_page`), `rewindsec/workstation/actions.py` (the optional
+`context` parameter), `rewindsec/workstation/worldops.py`
+(`payment_release_key`, `available_payment_contexts`),
+`rewindsec/workstation/service.py` (`_resolve_payment_context`, a rewritten
+`_browser_release_payment`), `rewindsec/workstation/projection.py` (the
+release-queue view), `rewindsec/scoring/opportunities.py` (the
+`m-meridian-amend-o2` resolution entry), `static/prototype/workstation.js`
+(per-entry rendering and per-entry account drafts). New tests:
+`tests/test_rewindsec2_bec_occurrence_payments.py`.
+
 ---
 
 ## 7. Quick reference
@@ -437,5 +1045,6 @@ architecture rather than relaxed.
 | v1 study artifacts (§4) | Frozen. Never extended or repointed for 2.0. |
 | v1 evaluation harnesses and results (§5) | Frozen. Never re-run against 2.0 and reported as continuous. |
 | RewindSec 2.0 (§6) | New names, new tables, new harness, framework-free deterministic core. |
-| RewindSec 2.0 results screen | Timeline, decisions, consequence chains and evidence are real session facts. The six dimension scores are an authored demonstration until Batch 4. |
+| RewindSec 2.0 results screen | Timeline, decisions, consequence chains, evidence, and (Batch 4) the six dimension scores are all real, server-derived session facts for any session created since Batch 4. A session created before it gets an explicit legacy/unscored projection, never a retroactive score. |
 | RewindSec 2.0 event selection (§6, Batch 3) | Deterministic authored scheduling policy, versioned `training-engine/v1`. No claim is made that it improves learning, retention, realism or difficulty calibration; those require human evidence. |
+| RewindSec 2.0 scoring (§6, Batch 4) | Deterministic, versioned, authored rubric (`rewindsec-scoring/v1`). It is implementation policy, not a validated measure of competence, retention or transfer; those require human research data this system does not collect. |

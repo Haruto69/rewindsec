@@ -27,8 +27,11 @@ __all__ = [
     "NOTE_BY_ID", "PAGE_BY_URL", "CHAIN_BY_ID", "DECISION_BY_ID",
     "SAFER_BY_DECISION", "MODE_BY_ID", "TASK_BY_ID", "FOCUS_IDS", "MODE_IDS",
     "RESOURCE_BY_ID", "resources_for_page", "resource_on_page",
+    "PAYMENT_CONTEXT_BY_ID", "payment_contexts_for_page",
+    "payment_context_on_page",
     "mode_flags", "timeline_for", "url_slug", "attachment_kind_label",
     "is_hostile_mail", "is_hostile_prompt", "is_hostile_page",
+    "evidence_model", "evidence_source", "evidence_fact_id",
 ]
 
 
@@ -76,6 +79,43 @@ def resources_for_page(url):
 def resource_on_page(url, resource_id):
     """One resource, or ``None`` if that page does not offer it."""
     return RESOURCE_BY_ID.get((url, resource_id))
+
+
+#: Payment contexts -- one release-queue entry -- keyed by ``(url,
+#: context_id)``. Batch 4 review correction: a recurring BEC surface presents
+#: the *same* invoice of record more than once, so "which payment is being
+#: released" cannot be derived from the page alone. The client names the page
+#: and the context id the projection gave it; the server resolves that pair
+#: here and recovers the occurrence the release belongs to.
+#:
+#: Context ids are unique across the whole site map, not merely within a
+#: page -- ``test_rewindsec2_bec_occurrence_payments`` asserts it -- so a
+#: context id can be carried in a decision record or an evidence source
+#: without also carrying the page it came from.
+PAYMENT_CONTEXT_BY_ID = {}
+for _url, _page in PAGE_BY_URL.items():
+    for _context in _page.get("payment_contexts") or ():
+        PAYMENT_CONTEXT_BY_ID[(_url, _context["id"])] = _context
+
+
+def payment_contexts_for_page(url):
+    """The release-queue entries authored on one payments page, in order.
+
+    Authored order is the queue order the learner sees, and the order the
+    server falls back to when a client names no context at all.
+    """
+    page = PAGE_BY_URL.get(url) or {}
+    return tuple(page.get("payment_contexts") or ())
+
+
+def payment_context_on_page(url, context_id):
+    """One release-queue entry, or ``None`` if that page has no such entry.
+
+    Scoped to the page deliberately: naming a context id that exists on a
+    *different* payments page must not resolve, or one supplier's release
+    action could settle another supplier's queue entry.
+    """
+    return PAYMENT_CONTEXT_BY_ID.get((url, context_id))
 
 
 CHAIN_BY_ID = dict(scenario.CONSEQUENCE_CHAINS)
@@ -191,3 +231,87 @@ def evidence_model(kind, ref):
         record = None
     analysis = (record or {}).get("analysis") or {}
     return tuple(analysis.get("evidence") or ())
+
+
+#: Which authored artifact carries the evidence model for a decision. A small
+#: authored map rather than a guess, because "the message this decision was
+#: about" is knowledge the content has and the code does not.
+#:
+#: Shared between the projection/debrief (which resolve it into the
+#: available/observed comparison a learner or a debrief sees) and the scoring
+#: package (which resolves it into Evidence Use / Verification Discipline
+#: evidence). One vocabulary, so the two can never drift apart.
+_EVIDENCE_SOURCE = {
+    "d-phish-credentials": ("mail", "m-payroll-restructure"),
+    "d-phish-report": ("mail", "m-payroll-restructure"),
+    "d-phish-verify": ("mail", "m-payroll-restructure"),
+    "d-phish-delete": ("mail", "m-payroll-restructure"),
+    "d-phish2-credentials": ("mail", "m-benefits-verify"),
+    "d-phish2-report": ("mail", "m-benefits-verify"),
+    "d-phish2-verify": ("mail", "m-benefits-verify"),
+    "d-phish2-delete": ("mail", "m-benefits-verify"),
+    "d-phish3-report": ("mail", "m-benefits-verify-o2"),
+    "d-phish3-delete": ("mail", "m-benefits-verify-o2"),
+    "d-ransom-open": ("mail", "m-rate-card"),
+    "d-ransom-report": ("mail", "m-rate-card"),
+    "d-ransom2-open": ("mail", "m-audit-checklist"),
+    "d-ransom2-report": ("mail", "m-audit-checklist"),
+    "d-ransom3-open": ("mail", "m-audit-checklist-o2"),
+    "d-ransom3-report": ("mail", "m-audit-checklist-o2"),
+    "d-bec-authorize": ("mail", "m-invoice-amend"),
+    "d-bec-reply": ("mail", "m-invoice-amend"),
+    "d-bec-verify": ("mail", "m-invoice-amend"),
+    "d-bec-report": ("mail", "m-invoice-amend"),
+    "d-bec2-authorize": ("mail", "m-meridian-amend"),
+    "d-bec2-reply": ("mail", "m-meridian-amend"),
+    "d-bec2-verify": ("mail", "m-meridian-amend"),
+    "d-bec2-report": ("mail", "m-meridian-amend"),
+    "d-bec3-reply": ("mail", "m-meridian-amend-o2"),
+    "d-bec3-report": ("mail", "m-meridian-amend-o2"),
+    "d-mfa-approve-hostile": ("prompt", "mfa-unexpected"),
+    "d-mfa-deny-hostile": ("prompt", "mfa-unexpected"),
+    "d-mfa-approve-legit": ("prompt", "mfa-vpn"),
+    "d-mfa-deny-legit": ("prompt", "mfa-vpn"),
+}
+
+
+def evidence_source(decision_id):
+    """Which authored (kind, ref) a decision's evidence model belongs to."""
+    return _EVIDENCE_SOURCE.get(decision_id)
+
+
+def evidence_fact_id(action_key):
+    """Map an authored evidence ``action`` key onto a ledger fact id.
+
+    The authored keys predate the ledger (they were the prototype's flat
+    observation map). Translating here rather than rewriting the content
+    keeps the authored evidence model stable while the mechanism underneath
+    it became real.
+    """
+    from rewindsec.workstation.bootstrap import (AUTH_HISTORY_FACT,
+                                                  contact_callback_fact,
+                                                  contact_fact,
+                                                  mail_attachment_fact,
+                                                  mail_body_fact,
+                                                  mail_header_fact,
+                                                  mail_link_fact, prompt_fact)
+    if not action_key or ":" not in action_key:
+        if action_key == "open_auth_history":
+            return AUTH_HISTORY_FACT
+        return None
+    verb, ref = action_key.split(":", 1)
+    if verb == "inspect_headers":
+        return mail_header_fact(ref)
+    if verb == "inspect_link":
+        return mail_link_fact(ref, 0)
+    if verb == "inspect_attachment":
+        return mail_attachment_fact(ref, 0)
+    if verb == "inspect_mfa":
+        return prompt_fact(ref)
+    if verb == "open_contact":
+        return contact_fact(ref)
+    if verb in ("call_contact", "verify_message"):
+        return contact_callback_fact(ref)
+    if verb == "open_mail":
+        return mail_body_fact(ref)
+    return None

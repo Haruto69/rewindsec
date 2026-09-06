@@ -42,7 +42,9 @@ structurally identical, not by hiding evidence the learner has earned.
 """
 
 from rewindsec.domain.enums import Mode, SessionStatus
+from rewindsec.domain.json_safe import thaw
 from rewindsec.workstation import clock
+from rewindsec.workstation import worldops
 from rewindsec.workstation.bootstrap import (NS_AUTH_HISTORY, NS_AUTH_REQUESTS,
                                              NS_BROWSER, NS_DIRECTORY,
                                              NS_FILE_LOCATIONS, NS_FILES,
@@ -50,10 +52,10 @@ from rewindsec.workstation.bootstrap import (NS_AUTH_HISTORY, NS_AUTH_REQUESTS,
                                              NS_MAILBOX, NS_MAIL_SENT,
                                              NS_MESSAGES, NS_NOTES,
                                              NS_NOTIFICATIONS, NS_SESSION,
-                                             NS_TASKS, contact_callback_fact,
-                                             mail_attachment_fact,
+                                             NS_TASKS, mail_attachment_fact,
                                              mail_header_fact, mail_link_fact,
-                                             prompt_fact, AUTH_HISTORY_FACT)
+                                             prompt_fact, AUTH_HISTORY_FACT,
+                                             file_document_fact)
 from rewindsec.workstation.content import index as ix
 from rewindsec.workstation.content import world as content_world
 
@@ -211,11 +213,19 @@ def _message_view(session, mail_id, state, record):
         "replied": bool(state.get("replied")),
         "order": state.get("order", 0),
         "received": state.get("received", ""),
-        # Shown the moment a message is opened, exactly as a mail client does.
-        "subject": surface.get("subject", ""),
-        "from_name": surface.get("from_name", ""),
+        # Shown the moment a message is opened, exactly as a mail client
+        # does. ``subject_override``/``from_name_override`` are a
+        # deterministic content-variation choice made at delivery time (see
+        # rewindsec.training.recurrence) -- authored surface data with a
+        # field swapped, never a different message. ``opening_line_override``
+        # replaces only the first paragraph of the authored body for the
+        # same reason: everything else about the message -- the financial
+        # detail, the closing, the attachment -- stays byte-identical to the
+        # authored surface.
+        "subject": state.get("subject_override") or surface.get("subject", ""),
+        "from_name": state.get("from_name_override") or surface.get("from_name", ""),
         "from_address": surface.get("from_address", ""),
-        "body": list(surface.get("body") or []),
+        "body": _body_view(surface, state.get("opening_line_override")),
         "links": [
             _link_view(session, mail_id, index, link)
             for index, link in enumerate(surface.get("links") or [])
@@ -228,6 +238,18 @@ def _message_view(session, mail_id, state, record):
         "headers": _observed_value(session, mail_header_fact(mail_id)),
         "own": False,
     }
+
+
+def _body_view(surface, opening_line_override):
+    """The authored body, with only its first paragraph swapped, if at all.
+
+    The rest of the message -- financial detail, closing, everything a
+    consequence or a decision might reason about -- is never touched here.
+    """
+    body = list(surface.get("body") or [])
+    if opening_line_override and body:
+        body = [opening_line_override] + body[1:]
+    return body
 
 
 def _link_view(session, mail_id, index, link):
@@ -297,6 +319,13 @@ def _files_view(session):
             # says so on its own attachment card before it is downloaded, and
             # a legitimate one would say the same.
             "macro": bool(state.get("macro")),
+            # The structured synthetic document, if this file is bound to
+            # one -- absent until the learner opens it (``files.open`` marks
+            # the fact observed), and absent forever if the file has no bound
+            # document at all. See ``rewindsec.workstation.content.documents``
+            # the front end renders this with safe DOM construction only --
+            # see ``static/prototype/workstation.js``'s document viewer.
+            "document": _observed_value(session, file_document_fact(file_id)),
         })
     files.sort(key=lambda item: item["order"])
     return {"locations": locations, "files": files}
@@ -377,6 +406,35 @@ def _page_view(session, url, page):
             "approved_by": invoice.get("approved_by", ""),
             "account_of_record": invoice.get("account_of_record", ""),
         }
+        # The release queue. One entry per *payment context* that has
+        # actually been raised -- see
+        # ``rewindsec.workstation.worldops.available_payment_contexts``: an
+        # entry belonging to a message that has not arrived is absent, not
+        # flagged, so the queue never says what the mailbox has not.
+        #
+        # Deliberately absent from every entry: ``authorize_decision`` and
+        # ``occurrence_key``. The first names an authored decision, and a
+        # decision id says what the release means before the learner has
+        # decided anything; the second names which presented occurrence the
+        # entry belongs to, which is recurrence structure and no part of a
+        # finance queue. The client sends back ``id`` and the server recovers
+        # both. Each entry restates the invoice of record it settles, because
+        # two entries on one page settle the same invoice and a queue that
+        # showed the reference once would look like a single payment.
+        view["payment_contexts"] = [
+            {
+                "id": context["id"],
+                "queue_ref": context.get("queue_ref", ""),
+                "reference": invoice.get("reference", ""),
+                "supplier": invoice.get("supplier", ""),
+                "amount": invoice.get("amount", ""),
+                "approved_by": invoice.get("approved_by", ""),
+                "account_of_record": invoice.get("account_of_record", ""),
+                "released_account": session.world.get(
+                    NS_BROWSER, worldops.payment_release_key(context["id"])),
+            }
+            for context in worldops.available_payment_contexts(session, url)
+        ]
     return view
 
 
@@ -445,6 +503,7 @@ def _incidents_view(session):
             "title": state.get("title", ""),
             "note": state.get("note", ""),
             "contained": bool(state.get("contained")),
+            "recovered": bool(state.get("recovered")),
             "opened": state.get("opened", ""),
         })
     return incidents
@@ -466,7 +525,12 @@ def _authenticator_view(session):
         observed = _observed_value(session, prompt_fact(state["prompt_id"]))
         requests.append({
             "id": request_id,
-            "app": surface.get("app", ""),
+            # ``app_override`` is a deterministic content-variation choice
+            # made at delivery time (see rewindsec.training.recurrence),
+            # exactly like a mail's ``subject_override``: authored surface
+            # data with the displayed application label swapped, never a
+            # different prompt and never a change to what "Details" reveals.
+            "app": state.get("app_override") or surface.get("app", ""),
             "arrived": state.get("arrived", ""),
             "number_match": surface.get("number_match", ""),
             "order": state.get("order", 0),
@@ -614,61 +678,13 @@ def _evidence_view(session, decision_id):
     return out
 
 
-#: Which authored artifact carries the evidence model for a decision. A small
-#: authored map rather than a guess, because "the message this decision was
-#: about" is knowledge the content has and the code does not.
-_EVIDENCE_SOURCE = {
-    "d-phish-credentials": ("mail", "m-payroll-restructure"),
-    "d-phish-report": ("mail", "m-payroll-restructure"),
-    "d-phish-verify": ("mail", "m-payroll-restructure"),
-    "d-phish-delete": ("mail", "m-payroll-restructure"),
-    "d-ransom-open": ("mail", "m-rate-card"),
-    "d-ransom-report": ("mail", "m-rate-card"),
-    "d-bec-authorize": ("mail", "m-invoice-amend"),
-    "d-bec-reply": ("mail", "m-invoice-amend"),
-    "d-bec-verify": ("mail", "m-invoice-amend"),
-    "d-bec-report": ("mail", "m-invoice-amend"),
-    "d-mfa-approve-hostile": ("prompt", "mfa-unexpected"),
-    "d-mfa-deny-hostile": ("prompt", "mfa-unexpected"),
-    "d-mfa-approve-legit": ("prompt", "mfa-vpn"),
-    "d-mfa-deny-legit": ("prompt", "mfa-vpn"),
-}
-
-
-def _evidence_source(decision_id):
-    return _EVIDENCE_SOURCE.get(decision_id)
-
-
-def _evidence_fact_id(action_key):
-    """Map an authored evidence ``action`` key onto a ledger fact id.
-
-    The authored keys predate the ledger (they were the prototype's flat
-    observation map). Translating here rather than rewriting the content keeps
-    the authored evidence model stable while the mechanism underneath it
-    became real.
-    """
-    if not action_key or ":" not in action_key:
-        if action_key == "open_auth_history":
-            return AUTH_HISTORY_FACT
-        return None
-    verb, ref = action_key.split(":", 1)
-    if verb == "inspect_headers":
-        return mail_header_fact(ref)
-    if verb == "inspect_link":
-        return mail_link_fact(ref, 0)
-    if verb == "inspect_attachment":
-        return mail_attachment_fact(ref, 0)
-    if verb == "inspect_mfa":
-        return prompt_fact(ref)
-    if verb == "open_contact":
-        from rewindsec.workstation.bootstrap import contact_fact
-        return contact_fact(ref)
-    if verb in ("call_contact", "verify_message"):
-        return contact_callback_fact(ref)
-    if verb == "open_mail":
-        from rewindsec.workstation.bootstrap import mail_body_fact
-        return mail_body_fact(ref)
-    return None
+#: Kept as module-level aliases of the shared, content-layer versions in
+#: :mod:`rewindsec.workstation.content.index` -- the post-session report, the
+#: scoring package and this module must all resolve a decision's evidence
+#: model the same way, so the vocabulary itself lives once, in content, not
+#: here.
+_evidence_source = ix.evidence_source
+_evidence_fact_id = ix.evidence_fact_id
 
 
 # ---------------------------------------------------------------------------
@@ -687,5 +703,8 @@ def _observed_value(session, fact_id):
     fact = session.ledger.get(fact_id)
     if not fact.observed:
         return None
-    value = fact.value
-    return {key: value[key] for key in value}
+    # ``thaw`` rather than a shallow dict comprehension: a fact's frozen value
+    # may nest further dicts/lists (a structured synthetic document's blocks
+    # and tables, for one), and a shallow copy would leave an inner
+    # ``MappingProxyType`` in the response, which ``jsonify`` cannot encode.
+    return thaw(fact.value)

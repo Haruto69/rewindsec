@@ -58,6 +58,39 @@ def candidates():
             prerequisites=(
                 el.Prereq(el.FACT_AVAILABLE, "org.payroll_sender"),
             )),
+        _candidate(
+            # Batch 4 review correction: a second, distinct phishing surface
+            # -- a benefits/HR themed lure, so a session's phishing exposure
+            # is not limited to a single one-shot payroll message. Its own
+            # decision quad (d-phish2-*), its own opportunity
+            # (rewindsec.scoring.opportunities), the same generic
+            # chain-credentials/chain-reported-hostile consequence model.
+            # Ungated: the genuine benefits page (intranet.northbridge
+            # .example/people/benefits) is always in the world already, so
+            # -- unlike the payroll lure, whose look-alike is only fair to
+            # judge once the genuine payroll host has appeared -- there is no
+            # equivalent fairness gate needed here.
+            #
+            # Batch 4 correction (content pipeline wiring): this is now the
+            # family's *recurring* candidate. ``max_occurrences=2`` -- the
+            # first occurrence is the authored ``m-benefits-verify`` message
+            # above; a second, later occurrence targets a distinct pre-seeded
+            # mail row (``m-benefits-verify-o2``, its own decision quad
+            # ``d-phish3-*``) whose subject, sender persona and opening line
+            # are drawn deterministically from the ``content_variation``
+            # stream at delivery time -- see
+            # ``rewindsec.training.delivery._deliver_mail`` and
+            # ``rewindsec.training.recurrence``. ``delivers_mail`` is
+            # deliberately left unset: that prerequisite would lock this
+            # candidate the moment the *first* occurrence's mail is
+            # delivered, which is exactly the recurrence this candidate now
+            # provides. Gating instead relies on ``max_occurrences`` and
+            # ``cooldown_ms``, exactly as every other recurring candidate in
+            # the catalogue already does.
+            "cand-phish-benefits-lure", FAMILY, activity="mail",
+            delivery="mail", content_ref="m-benefits-verify",
+            hostile=True, weight=10, max_occurrences=2, cooldown_ms=50000,
+            streams=("threat_selection", "content_variation")),
     )
 
 

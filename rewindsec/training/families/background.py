@@ -83,6 +83,24 @@ def candidates():
             delivers_mail="m-travel-reimb", weight=10,
             streams=("background",)),
         _candidate(
+            # Batch 4: the first candidate whose delivery is enriched from
+            # the runtime content pipeline (a deterministic subject-line
+            # variant drawn from ``content_variation``, and an attachment
+            # bound to a document the pipeline's catalogue actually
+            # generated -- see rewindsec.workstation.content.documents).
+            "cand-bg-facilities-followup", FAMILY, activity="mail",
+            delivery="mail", content_ref="m-facilities-followup",
+            delivers_mail="m-facilities-followup", weight=8,
+            streams=("background", "content_variation")),
+        _candidate(
+            # Batch 4 review correction: the second previously-unwired
+            # background archetype ("arche-mail-ordinary-team-update") now
+            # live.
+            "cand-bg-standup-notes", FAMILY, activity="mail",
+            delivery="mail", content_ref="m-standup-notes",
+            delivers_mail="m-standup-notes", weight=8,
+            streams=("background",)),
+        _candidate(
             "cand-bg-team-chatter", FAMILY, activity="message",
             delivery="chatter", content_ref="conv-ops-team", weight=10,
             max_occurrences=4, cooldown_ms=40000,

@@ -54,9 +54,20 @@ def candidates():
                 el.Prereq(el.INCIDENT_ABSENT, "inc-account"),
             )),
         _candidate(
+            # Batch 4 correction (content pipeline wiring): the family's
+            # recurring candidate -- already bounded to two occurrences by
+            # ``max_occurrences``/``cooldown_ms``, modelling MFA-fatigue
+            # behaviour. Each raised request now draws its notification
+            # wording and the authenticator's displayed application label
+            # from the ``content_variation`` stream at delivery time -- see
+            # ``rewindsec.training.delivery._deliver_mfa`` -- while the
+            # legitimate/hostile ground truth and the approval prompt's
+            # inspectable device/location/network detail stay exactly as
+            # authored.
             "cand-mfa-after-compromise", FAMILY, activity="mfa",
             delivery="mfa", content_ref="mfa-unexpected", hostile=True,
             weight=18, max_occurrences=2, cooldown_ms=45000,
+            streams=("threat_selection", "content_variation"),
             prerequisites=(
                 # The factual link. An attacker with a session tries again.
                 el.Prereq(el.INCIDENT_OPEN, "inc-account"),

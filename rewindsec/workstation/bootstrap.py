@@ -33,6 +33,7 @@ state of the learner's screen and not just a flag in a database.
 
 from rewindsec.core.events import EventSource, EventVisibility
 from rewindsec.workstation import clock
+from rewindsec.workstation.content import documents as content_documents
 from rewindsec.workstation.content import index as ix
 from rewindsec.workstation.content import scenario, world
 
@@ -43,7 +44,8 @@ __all__ = [
     "NS_SESSION", "NS_DECISIONS", "NS_DIRECTORY", "NS_FILE_LOCATIONS", "mail_header_fact", "mail_link_fact",
     "mail_attachment_fact", "mail_body_fact", "prompt_fact", "contact_fact",
     "contact_callback_fact", "file_fact", "conversation_fact", "page_fact",
-    "context_fact", "AUTH_HISTORY_FACT",
+    "context_fact", "AUTH_HISTORY_FACT", "file_document_fact",
+    "introduce_document_fact",
 ]
 
 # -- world namespaces --------------------------------------------------------
@@ -107,6 +109,18 @@ def contact_callback_fact(contact_id):
 
 def file_fact(file_id):
     return "file.%s.metadata" % file_id
+
+
+def file_document_fact(file_id):
+    """The fact carrying a file's structured synthetic document content.
+
+    Distinct from :func:`file_fact` (the file's *metadata* -- name, size,
+    owner -- which is available the moment the file exists) because a
+    document's *content* is inspection-only: it becomes observed only when
+    the learner actually opens the file, never merely because the file
+    appeared in Files. See ``rewindsec.workstation.content.documents``.
+    """
+    return "file.%s.document" % file_id
 
 
 def conversation_fact(conversation_id):
@@ -300,6 +314,25 @@ def _seed_files(session):
                        "owner": entry.get("owner"),
                        "source": entry.get("source")},
                 source="filesystem", available=True)
+            introduce_document_fact(session, entry["id"])
+
+
+def introduce_document_fact(session, file_id, available=True):
+    """Introduce (if bound) the structured document behind one file.
+
+    Available the moment the file exists -- exactly like :func:`file_fact`'s
+    metadata -- but never *observed* until the learner opens it, which is
+    what keeps AVAILABLE != OBSERVED true for document content too.
+    """
+    document = content_documents.document_for_file(file_id)
+    if document is None:
+        return
+    fact_id = _fact_id(file_document_fact(file_id))
+    if session.ledger.has(fact_id):
+        return
+    session.introduce_fact(
+        fact_id, category="file_document", value=document.to_projection(),
+        source="filesystem", available=available)
 
 
 def _seed_notes(session):

@@ -388,4 +388,12 @@ def test_the_debrief_is_available_once_the_session_has_ended(driver):
     document = debrief_document(driver.session())
     # It *is* allowed to explain, which is the whole point of a debrief.
     assert "timeline" in document
-    assert document["scoring"]["engine"] == "none"
+    # Batch 4: this session was created after the scoring versions existed,
+    # so it gets a real, versioned rubric result rather than the old
+    # ``{"engine": "none"}`` placeholder.
+    scoring = document["scoring"]
+    assert scoring["available"] is True
+    assert scoring["legacy"] is False
+    assert scoring["rubric_version"] == "rewindsec-rubric/v1"
+    assert scoring["evidence_model_version"] == "rewindsec-evidence-model/v1"
+    assert isinstance(scoring["dimensions"], list) and len(scoring["dimensions"]) == 6

@@ -236,11 +236,98 @@ DECISIONS = {
         "dimensions": ["incident_response"],
         "chain": None,
     },
+    # -- Batch 4 review correction: a second, distinct phishing surface -----
+    #
+    # Mirrors the payroll lure's four-decision shape exactly, over a
+    # benefits/HR pretext instead. A separate opportunity
+    # (rewindsec.scoring.opportunities), a separate decision quad, the same
+    # generic consequence chains.
+    "d-phish2-credentials": {
+        "label": "Signed in on the benefits confirmation page",
+        "family": "phishing", "class": "unsafe",
+        "dimensions": ["security_judgment", "evidence_use",
+                       "verification_discipline"],
+        "chain": "chain-credentials",
+    },
+    "d-phish2-report": {
+        "label": "Reported the benefits enrolment message",
+        "family": "phishing", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
+    },
+    "d-phish2-verify": {
+        "label": "Checked with HR on a known channel first",
+        "family": "phishing", "class": "safe",
+        "dimensions": ["verification_discipline", "evidence_use"],
+        "chain": None,
+    },
+    "d-phish2-delete": {
+        "label": "Deleted the benefits enrolment message without reporting",
+        "family": "phishing", "class": "neutral",
+        "dimensions": ["incident_response"],
+        "chain": None,
+    },
+    # -- Batch 4 correction (content pipeline wiring): the benefits-lure
+    # candidate's second, generated occurrence (see
+    # rewindsec.training.recurrence). Reporting/deleting it are their own
+    # decisions -- a distinct opportunity from the first occurrence's --
+    # while signing in on the (byte-identical) look-alike portal it links to
+    # still records the original ``d-phish2-credentials``: it is the same
+    # portal, followed up on, not a second one. -------------------------
+    "d-phish3-report": {
+        "label": "Reported the follow-up benefits enrolment message",
+        "family": "phishing", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
+    },
+    "d-phish3-delete": {
+        "label": "Deleted the follow-up benefits enrolment message without "
+                 "reporting",
+        "family": "phishing", "class": "neutral",
+        "dimensions": ["incident_response"],
+        "chain": None,
+    },
     "d-ransom-open": {
         "label": "Opened the attached rate card",
         "family": "ransomware", "class": "unsafe",
         "dimensions": ["security_judgment", "operational_accuracy"],
         "chain": "chain-file-incident",
+    },
+    # -- Batch 4 review correction: a second, distinct ransomware lure ------
+    #
+    # A different macro-bearing attachment, a different pretext, the same
+    # generic chain-file-incident/chain-uncontained/chain-reported-hostile
+    # consequence model the rate-card lure already uses -- one safe
+    # synthetic file-availability incident, not a second parallel one.
+    "d-ransom2-open": {
+        "label": "Opened the attached audit checklist",
+        "family": "ransomware", "class": "unsafe",
+        "dimensions": ["security_judgment", "operational_accuracy"],
+        "chain": "chain-file-incident",
+    },
+    "d-ransom2-report": {
+        "label": "Reported the audit checklist message",
+        "family": "ransomware", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
+    },
+    # -- Batch 4 correction (content pipeline wiring): the audit-checklist
+    # candidate's second, generated occurrence. Opening its attachment
+    # converges on the same synthetic file-availability consequence model
+    # every macro lure in this catalogue already uses -- one incident, not
+    # a second parallel one, exactly like the rate-card/audit-checklist
+    # pair already do. ----------------------------------------------------
+    "d-ransom3-open": {
+        "label": "Opened the follow-up audit checklist",
+        "family": "ransomware", "class": "unsafe",
+        "dimensions": ["security_judgment", "operational_accuracy"],
+        "chain": "chain-file-incident",
+    },
+    "d-ransom3-report": {
+        "label": "Reported the follow-up audit checklist message",
+        "family": "ransomware", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
     },
     "d-ransom-download": {
         "label": "Downloaded the attached rate card",
@@ -257,13 +344,20 @@ DECISIONS = {
     "d-ransom-isolate": {
         "label": "Disconnected the workstation and called the Service Desk",
         "family": "ransomware", "class": "recovery_good",
-        "dimensions": ["incident_response", "recovery_quality"],
+        # Batch 4: tagged with ``incident_response`` only. Containment is not
+        # recovery -- ``d-ransom-recover`` is the decision that exists
+        # specifically so Recovery Quality has a genuine positive path
+        # distinct from "isolated in time". Isolating no longer contributes
+        # Recovery Quality evidence on its own; see
+        # rewindsec.scoring.opportunities for the opportunity that keeps the
+        # two separate.
+        "dimensions": ["incident_response"],
         "chain": "chain-contained",
     },
     "d-ransom-continue": {
         "label": "Carried on working while files were failing",
         "family": "ransomware", "class": "recovery_poor",
-        "dimensions": ["incident_response", "recovery_quality"],
+        "dimensions": ["incident_response"],
         "chain": "chain-uncontained",
     },
     "d-mfa-approve-hostile": {
@@ -315,6 +409,52 @@ DECISIONS = {
         "dimensions": ["security_judgment", "incident_response"],
         "chain": "chain-reported-hostile",
     },
+    # -- Batch 4 review correction: a second, distinct BEC surface ----------
+    #
+    # Mirrors the Calderwood decision quad exactly, over the Meridian
+    # (stationery) supplier relationship instead. A separate opportunity, a
+    # separate decision quad, the same authorize/reply/verify/report shape.
+    "d-bec2-authorize": {
+        "label": "Released the payment to the updated account",
+        "family": "bec", "class": "unsafe",
+        "dimensions": ["security_judgment", "verification_discipline",
+                       "operational_accuracy"],
+        "chain": "chain-payment-meridian",
+    },
+    "d-bec2-reply": {
+        "label": "Replied to the account-change request to confirm it",
+        "family": "bec", "class": "unsafe",
+        "dimensions": ["verification_discipline"],
+        "chain": None,
+    },
+    "d-bec2-verify": {
+        "label": "Checked the account change on a known channel",
+        "family": "bec", "class": "safe",
+        "dimensions": ["verification_discipline", "evidence_use"],
+        "chain": None,
+    },
+    "d-bec2-report": {
+        "label": "Reported the account-change request",
+        "family": "bec", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
+    },
+    # -- Batch 4 correction (content pipeline wiring): the Meridian
+    # candidate's second, generated occurrence -- a follow-up on the same
+    # payment-redirection request, not a second vendor. -------------------
+    "d-bec3-reply": {
+        "label": "Replied to the follow-up account-change request to "
+                 "confirm it",
+        "family": "bec", "class": "unsafe",
+        "dimensions": ["verification_discipline"],
+        "chain": None,
+    },
+    "d-bec3-report": {
+        "label": "Reported the follow-up account-change request",
+        "family": "bec", "class": "safe",
+        "dimensions": ["security_judgment", "incident_response"],
+        "chain": "chain-reported-hostile",
+    },
     "d-report-legitimate": {
         "label": "Reported a genuine work request",
         "family": None, "class": "over_suspicious",
@@ -350,6 +490,19 @@ DECISIONS = {
         "label": "Downloaded the rate card from the billing site",
         "family": "ransomware", "class": "neutral",
         "dimensions": [],
+        "chain": None,
+    },
+
+    # -- Batch 4: recovery, distinct from containment -----------------------
+    #
+    # ``d-ransom-isolate`` is containment: it stops the spread. This is the
+    # separate, later step of putting the affected files back -- only
+    # reachable once containment has already happened -- and it is what gives
+    # Recovery Quality a genuine positive path beyond "isolated in time".
+    "d-ransom-recover": {
+        "label": "Restored the affected files from a verified backup",
+        "family": "ransomware", "class": "recovery_good",
+        "dimensions": ["recovery_quality"],
         "chain": None,
     },
 }
@@ -672,6 +825,60 @@ CONSEQUENCE_CHAINS = {
             },
         ],
     },
+    "chain-payment-meridian": {
+        # Batch 4 review correction: the Meridian surface's own payment
+        # chain -- structurally identical to "chain-payment", with its own
+        # invoice/amount/account text so a released Meridian payment is
+        # never described using Calderwood's numbers.
+        "id": "chain-payment-meridian",
+        "incident_id": "inc-payment-meridian",
+        "title": "Supplier payment",
+        "settles_after": "s-pay2-3",
+        "steps": [
+            {
+                "id": "s-pay2-1", "cause": "decision", "delay_ms": 7000,
+                "summary": "The payment is queued against the new account.",
+                "effects": [
+                    {"type": "incident", "incident_id": "inc-payment-meridian",
+                     "title": "Supplier payment",
+                     "note": "£612.40 released against settlement details "
+                             "that arrived by mail."},
+                    {"type": "notification", "kind": "system",
+                     "title": "Payment instruction accepted",
+                     "body": "MP-7734 · £612.40 · account ending 3384",
+                     "opens": None},
+                ],
+            },
+            {
+                "id": "s-pay2-2", "cause": "s-pay2-1", "delay_ms": 18000,
+                "summary": "Finance query the account they do not recognise.",
+                "effects": [
+                    {"type": "message", "conversation_id": "conv-arjun-rao",
+                     "from": "Arjun Rao",
+                     "text": "Aarti, MP-7734 has gone out to an account we "
+                             "have never used. Who confirmed the change? "
+                             "Nothing came through me."},
+                    {"type": "notification", "kind": "message",
+                     "title": "Arjun Rao",
+                     "body": "MP-7734 has gone out to an account we have "
+                             "never used.",
+                     "opens": {"app": "messages",
+                               "conversation_id": "conv-arjun-rao"}},
+                ],
+            },
+            {
+                "id": "s-pay2-3", "cause": "s-pay2-2", "delay_ms": 28000,
+                "summary": "The real supplier is still waiting to be paid.",
+                "effects": [
+                    {"type": "mail", "mail_id": "m-meridian-chase"},
+                    {"type": "notification", "kind": "mail",
+                     "title": "Gordon Whyte",
+                     "body": "MP-7734 — we have not received the payment.",
+                     "opens": {"app": "mail", "mail_id": "m-meridian-chase"}},
+                ],
+            },
+        ],
+    },
     "chain-bec-reply": {
         "id": "chain-bec-reply",
         "incident_id": None,
@@ -912,6 +1119,40 @@ CONSEQUENCE_MAIL = [
         },
     },
     {
+        # Batch 4 review correction: the Meridian surface's own settling
+        # consequence mail, mirroring m-vendor-chase.
+        "id": "m-meridian-chase",
+        "arrival": "consequence",
+        "folder": "inbox",
+        "thread_id": "t-meridian",
+        "unread": True,
+        "received": "+ later",
+        "order": 222,
+        "surface": {
+            "subject": "MP-7734 — we have not received the payment",
+            "from_name": "Gordon Whyte",
+            "from_address": "gordon.whyte@meridianprint.example",
+            "reply_to": None,
+            "to": "aarti.venkatesh@northbridge.example",
+            "body": [
+                "Hi Aarti,",
+                "Our accounts team says MP-7734 is still outstanding. "
+                "Nothing has reached the Bramwell Trust account.",
+                "Also — we have not changed banks and nobody here has written "
+                "to you about it. Could you call me on the usual number?",
+                "Gordon",
+            ],
+            "links": [],
+            "attachments": [],
+        },
+        "analysis": {
+            "disposition": "legitimate", "family": None,
+            "why": "The real supplier, on the real domain, contradicting the "
+                   "request that was acted on.",
+            "establishes_context": [],
+        },
+    },
+    {
         "id": "m-invoice-confirm",
         "arrival": "consequence",
         "folder": "inbox",
@@ -987,6 +1228,38 @@ SAFER_ALTERNATIVES = {
                           "blocked for the other people who received it. "
                           "Confirming your salary record was never actually "
                           "required.",
+        "still_true": "The session that opened is still open. Nothing about "
+                      "this explanation undoes it — the rest of the day "
+                      "continues from where you are.",
+    },
+    "d-phish2-credentials": {
+        "heading": "Signing in on that page",
+        "what_you_did": "You opened the link in the benefits enrolment "
+                        "message and signed in with your Northbridge account "
+                        "on benefits-northbridge.example.",
+        "what_followed": [
+            "A session opened on your account from an unrecognised device in "
+            "Frankfurt.",
+            "An inbox rule was created that files messages from Security "
+            "Operations into Archive.",
+            "A colleague received a document link that appeared to come from "
+            "you.",
+        ],
+        "safer_process": [
+            "Treat any request to sign in that arrives by mail as unverified, "
+            "however ordinary the subject looks.",
+            "Compare the link host against Northbridge's own domain — "
+            "benefits-northbridge.example is not it.",
+            "Reach HR on a channel the message did not supply — the "
+            "Directory record, or the extension you already had.",
+            "Report the message so the same batch can be blocked for everyone "
+            "else who got it.",
+        ],
+        "likely_outcome": "No session would have opened, no rule would have "
+                          "been created, and the message would have been "
+                          "blocked for the other people who received it. "
+                          "Confirming benefits selections by mail was never "
+                          "actually required.",
         "still_true": "The session that opened is still open. Nothing about "
                       "this explanation undoes it — the rest of the day "
                       "continues from where you are.",

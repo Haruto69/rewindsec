@@ -61,14 +61,42 @@ CONSEQUENCE_EVENT_TYPE = "consequence.step"
 NS_CONSEQUENCE_MAP = "consequence_map"
 
 
-def already_decided(session, decision_id):
+def _record_id(decision_id, occurrence_key):
+    """The :data:`NS_DECISIONS` storage key for one decision.
+
+    ``occurrence_key`` is ``None`` for every decision this architecture has
+    always treated as one-shot for the whole session (``d-ransom-isolate``,
+    an ordinary reply decision, and so on): those keep the bare
+    ``decision_id`` as their storage key, byte-identical to before occurrence
+    scoping existed, which is what keeps every pre-existing one-shot decision's
+    semantics untouched.
+
+    A caller that *does* pass an ``occurrence_key`` -- the request id of one
+    raised MFA prompt, the mail id of one recurring lure's occurrence -- gets
+    a distinct row per occurrence, so the same semantic decision class
+    (``d-mfa-approve-hostile``, ``d-phish2-credentials``) can be recorded
+    independently once per occurrence instead of colliding into "already
+    decided" after the first one. ``@`` is not a character any authored
+    decision id, mail id or request id ever contains, so the join is
+    unambiguous and never needs escaping.
+    """
+    if occurrence_key is None:
+        return decision_id
+    return "%s@%s" % (decision_id, occurrence_key)
+
+
+def already_decided(session, decision_id, occurrence_key=None):
     """Whether this decision has been recorded in this session before.
 
-    Decisions are recorded once. A learner who reports the same message twice
-    has done one thing, and applying its chain twice would double every
-    consequence in it.
+    Decisions are recorded once *per occurrence*. A learner who reports the
+    same message twice has done one thing, and applying its chain twice would
+    double every consequence in it -- but a learner who resolves a *second*,
+    independently-presented occurrence of the same recurring surface (a
+    second raised MFA prompt, a second lure sharing the first lure's portal)
+    has done a second, independent thing, and ``occurrence_key`` is what lets
+    that be recorded rather than silently refused as "already decided".
     """
-    return session.world.has(NS_DECISIONS, decision_id)
+    return session.world.has(NS_DECISIONS, _record_id(decision_id, occurrence_key))
 
 
 def chain_for_decision(decision_id):
@@ -81,46 +109,65 @@ def safer_alternative_for(decision_id):
 
 
 def record_decision(session, decision_id, action_id, where, mode_flags,
-                    cause_event_id=None):
+                    cause_event_id=None, occurrence_key=None):
     """Record one consequential decision and schedule its authored chain.
 
     Returns the id of the event that represents the decision, or ``None`` if
-    the decision is unknown or has already been made. The event is internal:
-    the *decision* is a piece of authored pedagogy vocabulary, and a
-    learner-visible event named after one would be a label.
+    the decision is unknown or has already been made *for this occurrence*.
+    The event is internal: the *decision* is a piece of authored pedagogy
+    vocabulary, and a learner-visible event named after one would be a label.
+
+    ``occurrence_key`` distinguishes which presented occurrence this decision
+    resolves, for the handful of decision classes a session can legitimately
+    record more than once (see :func:`_record_id`). It is stored on the row
+    (``occurrence_key``) alongside the semantic class (``decision_class``), so
+    every reader of :data:`NS_DECISIONS` -- scoring, the debrief, this module's
+    own chain bookkeeping -- can recover both "what kind of decision was this"
+    and "which occurrence did it resolve" from the row alone, independent of
+    how it happens to be keyed in the namespace.
     """
     definition = ix.DECISION_BY_ID.get(decision_id)
-    if definition is None or already_decided(session, decision_id):
+    if definition is None or already_decided(session, decision_id, occurrence_key):
         return None
 
+    record_id = _record_id(decision_id, occurrence_key)
     seq = worldops.next_seq(session, "decision_seq")
     event = session.record_immediate_event(
-        "decision.recorded", payload={"decision": decision_id},
+        "decision.recorded",
+        payload={"decision": decision_id, "occurrence_key": occurrence_key},
         source=EventSource.LEARNER, visibility=EventVisibility.INTERNAL,
         causes=(cause_event_id,) if cause_event_id else ())
 
-    session.mutate_world(NS_DECISIONS, decision_id, {
+    session.mutate_world(NS_DECISIONS, record_id, {
         "order": seq,
         "action_id": action_id,
         "where": where or "",
         "at_ms": session.now_ms,
+        "decision_class": decision_id,
+        "occurrence_key": occurrence_key,
     }, cause_event_id=event.event_id)
 
     chain = ix.CHAIN_BY_ID.get(definition.get("chain"))
     if chain is not None:
-        _schedule_chain(session, chain, decision_id, action_id, mode_flags,
-                        event.event_id)
+        _schedule_chain(session, chain, decision_id, record_id, action_id,
+                        mode_flags, event.event_id)
     return event.event_id
 
 
-def _schedule_chain(session, chain, decision_id, action_id, mode_flags,
-                    cause_event_id):
+def _schedule_chain(session, chain, decision_id, record_id, action_id,
+                    mode_flags, cause_event_id):
     """Queue every step of an authored chain on the session's scheduler.
 
     The whole chain is scheduled up front rather than step-by-step. That is
     what makes the chain survive a resume without any live object holding it:
     the scheduler entries are part of the persisted session, and rebuilding
     the session from its snapshot rebuilds the pending chain exactly.
+
+    Steps are keyed in :data:`NS_CONSEQUENCE_MAP` by *record_id*, not the bare
+    semantic ``decision_id`` -- two occurrences of the same recurring decision
+    class each schedule their own chain, and keying the map by the shared
+    class alone would let a second occurrence's steps silently overwrite the
+    first occurrence's causal-parent links (or vice versa).
     """
     scale = mode_flags.get("consequence_delay_scale", 1.0)
     for step in chain["steps"]:
@@ -139,6 +186,7 @@ def _schedule_chain(session, chain, decision_id, action_id, mode_flags,
                 "chain": chain["id"],
                 "step": step["id"],
                 "decision": decision_id,
+                "record_id": record_id,
                 "action": action_id,
             },
             source=EventSource.CONSEQUENCE,
@@ -178,6 +226,11 @@ def apply_step_event(session, event, mode_flags):
                 "suppressed": True, "summary": ""}
 
     decision_id = payload.get("decision")
+    # ``record_id`` falls back to the bare decision id for chains scheduled
+    # before this field existed (an in-flight resumed session): those chains
+    # were never occurrence-scoped in the first place, so the fallback is
+    # exactly their original, unscoped behaviour.
+    record_id = payload.get("record_id", decision_id)
     action_id = payload.get("action")
     incident_key = chain.get("incident_id")
     incident_id = None
@@ -207,7 +260,7 @@ def apply_step_event(session, event, mode_flags):
             first_mutation = mutation
 
     if incident_id:
-        parents = _parent_consequences(session, decision_id, step)
+        parents = _parent_consequences(session, record_id, step)
         consequence = session.record_consequence(
             incident_id,
             parent_consequence_ids=parents,
@@ -222,7 +275,7 @@ def apply_step_event(session, event, mode_flags):
                           if first_mutation is not None else None),
             description=step.get("summary"))
         session.mutate_world(
-            NS_CONSEQUENCE_MAP, "%s:%s" % (decision_id, step["id"]),
+            NS_CONSEQUENCE_MAP, "%s:%s" % (record_id, step["id"]),
             consequence.consequence_id, cause_event_id=event.event_id)
 
     settled = step["id"] == chain.get("settles_after")
@@ -255,19 +308,22 @@ def _incident_note(step):
     return None
 
 
-def _parent_consequences(session, decision_id, step):
+def _parent_consequences(session, record_id, step):
     """The causal parent of this step, if it has one that has already fired.
 
     ``cause == "decision"`` means a first-order effect and has no parent
     consequence -- its parent is the learner action, which the consequence
     records separately. A named parent that has not fired yet (possible if a
     later step has a shorter delay than its parent) simply yields no link
-    rather than a dangling reference.
+    rather than a dangling reference. Keyed by *record_id* -- the same
+    occurrence-scoped key :func:`apply_step_event` writes to
+    :data:`NS_CONSEQUENCE_MAP` -- so a second occurrence's chain can never
+    pick up a first occurrence's step as its causal parent.
     """
     cause = step.get("cause")
     if not cause or cause == "decision":
         return ()
-    parent = session.world.get(NS_CONSEQUENCE_MAP, "%s:%s" % (decision_id, cause))
+    parent = session.world.get(NS_CONSEQUENCE_MAP, "%s:%s" % (record_id, cause))
     if parent and session.incidents.has_consequence(parent):
         return (parent,)
     return ()

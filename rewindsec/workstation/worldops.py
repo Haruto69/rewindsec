@@ -21,7 +21,8 @@ from rewindsec.workstation.bootstrap import (NS_AUTH_HISTORY, NS_AUTH_REQUESTS,
                                              NS_MAIL, NS_MAILBOX, NS_MAIL_SENT,
                                              NS_MESSAGES, NS_NOTES,
                                              NS_NOTIFICATIONS, NS_SESSION,
-                                             NS_TASKS, mail_attachment_fact,
+                                             NS_TASKS, introduce_document_fact,
+                                             mail_attachment_fact,
                                              mail_body_fact, mail_header_fact,
                                              mail_link_fact, prompt_fact)
 from rewindsec.workstation.content import index as ix
@@ -32,6 +33,7 @@ __all__ = [
     "append_message", "create_auth_request", "record_auth_activity",
     "set_task", "open_incident", "set_incident_contained", "set_browser_state",
     "set_session_flag", "set_note", "next_seq", "resolve_download_name",
+    "payment_release_key", "available_payment_contexts",
 ]
 
 #: Security Operations mail is what the authored mailbox rule hides. Kept as a
@@ -109,7 +111,8 @@ def deliver_mail(session, mail_id, folder=None, cause_event_id=None):
 
     mutation = session.mutate_world(NS_MAIL, mail_id, dict(
         state, delivered=True, unread=True, read=False,
-        folder=target_folder, received=clock.workday_label(session.now_ms)),
+        folder=target_folder, received=clock.workday_label(session.now_ms),
+        delivered_at_ms=session.now_ms),
         cause_event_id=event.event_id)
 
     _make_mail_facts_available(session, message)
@@ -299,6 +302,7 @@ def add_downloaded_file(session, file_id, location_id, name, kind, size,
     existing = session.world.get(NS_FILES, file_id)
     if existing is not None:
         return None
+    introduce_document_fact(session, file_id)
     return session.mutate_world(NS_FILES, file_id, {
         "location": location_id,
         "name": resolve_download_name(session, location_id, name),
@@ -342,12 +346,22 @@ def append_message(session, conversation_id, sender, text, unread=True,
 # Authenticator
 # ---------------------------------------------------------------------------
 
-def create_auth_request(session, prompt_id, cause_event_id=None):
+def create_auth_request(session, prompt_id, cause_event_id=None,
+                        app_override=None, notification_body=None,
+                        content_variation_id=None):
     """Raise one approval request, unless an identical one is already pending.
 
     The request id is derived from a persisted counter rather than from the
     prompt id alone, because the same authored prompt can legitimately be
     raised twice in one session and the learner has to be able to act on each.
+
+    *app_override*, *notification_body* and *content_variation_id* are an
+    optional, deterministic content-variation choice made by the caller (see
+    ``rewindsec.training.recurrence``) -- the authored prompt surface
+    (application, device, location, network) is unchanged and remains the
+    only thing the learner can actually inspect; only the request's own
+    displayed application label and its arrival notification's wording may
+    vary between two requests raised from the same authored prompt.
     """
     for key, value in session.world.get_component(NS_AUTH_REQUESTS).items():
         if value.get("prompt_id") == prompt_id and value.get("status") == "pending":
@@ -366,6 +380,9 @@ def create_auth_request(session, prompt_id, cause_event_id=None):
         "status": "pending",
         "arrived": clock.workday_label(session.now_ms),
         "order": seq,
+        "at_ms": session.now_ms,
+        "app_override": app_override,
+        "content_variation_id": content_variation_id,
     }, cause_event_id=event.event_id)
 
     fact_id = prompt_fact(prompt_id)
@@ -373,9 +390,10 @@ def create_auth_request(session, prompt_id, cause_event_id=None):
         session.make_fact_available(fact_id)
 
     surface = ix.PROMPT_BY_ID[prompt_id]["surface"]
+    body = notification_body or "%s . %s" % (
+        surface.get("app", ""), surface.get("location", ""))
     notification = raise_notification(
-        session, kind="auth", title="Approval requested",
-        body="%s . %s" % (surface.get("app", ""), surface.get("location", "")),
+        session, kind="auth", title="Approval requested", body=body,
         opens={"app": "authenticator"}, cause_event_id=event.event_id)
     return mutation, notification
 
@@ -417,6 +435,43 @@ def set_task(session, task_id, state, note="", cause_event_id=None):
         cause_event_id=event.event_id)
 
 
+def payment_release_key(context_id):
+    """The :data:`NS_BROWSER` key holding one release-queue entry's outcome.
+
+    One key per *payment context*, never one per page. Two occurrences of a
+    recurring BEC surface settle the same invoice of record through the same
+    payments page, and a single page-wide "released" flag would make the
+    second occurrence unreachable the moment the first was actioned -- which
+    is exactly the blocker this correction removes.
+    """
+    return "payment_released:%s" % context_id
+
+
+def _payment_context_available(session, context):
+    """Whether this release-queue entry has actually been raised yet.
+
+    A context with no ``requires_mail`` is part of the ordinary release queue
+    and is available from the start of the session: the invoice is genuinely
+    due whether or not anybody ever asks for the account to be changed. A
+    context that names one is a *second* release request raised by a later
+    occurrence, and it does not exist until that occurrence's message has
+    actually been delivered -- so a client cannot settle a payment nothing in
+    the learner's day has raised, and cannot use the presence of a second
+    queue entry to learn that a second message is coming.
+    """
+    required = context.get("requires_mail")
+    if not required:
+        return True
+    state = session.world.get(NS_MAIL, required)
+    return bool(state and state.get("delivered"))
+
+
+def available_payment_contexts(session, url):
+    """The release-queue entries on one page that have actually been raised."""
+    return tuple(context for context in ix.payment_contexts_for_page(url)
+                 if _payment_context_available(session, context))
+
+
 def open_incident(session, incident_key, title, note, cause_event_id=None):
     """Open (or reuse) one incident, in the world *and* in the causal graph.
 
@@ -442,6 +497,7 @@ def open_incident(session, incident_key, title, note, cause_event_id=None):
         "note": note,
         "contained": False,
         "opened": clock.workday_label(session.now_ms),
+        "opened_at_ms": session.now_ms,
     }, cause_event_id=event.event_id)
     return incident.incident_id, mutation
 
@@ -451,8 +507,29 @@ def set_incident_contained(session, incident_key, contained=True,
     current = session.world.get(NS_INCIDENTS, incident_key)
     if current is None:
         return None
+    updated = dict(current, contained=bool(contained))
+    if contained and "contained_at_ms" not in current:
+        # Recorded once, at first containment -- an opportunity's timestamp
+        # must not move if the same containment is (harmlessly) re-recorded.
+        updated["contained_at_ms"] = session.now_ms
+    return session.mutate_world(NS_INCIDENTS, incident_key, updated,
+                                cause_event_id=cause_event_id)
+
+
+def set_incident_recovered(session, incident_key, cause_event_id=None):
+    """Mark an incident recovered: a fact layered *on top of* containment.
+
+    Distinct from :func:`set_incident_contained` on purpose -- Architecture
+    Spec v1.1 (Batch 4) S24 requires containment and recovery to remain
+    separate facts. Recovering does not close, delete or reopen the incident;
+    it does not touch ``contained``; it is simply one more true statement
+    about what happened to this incident, after the fact it describes.
+    """
+    current = session.world.get(NS_INCIDENTS, incident_key)
+    if current is None:
+        return None
     return session.mutate_world(NS_INCIDENTS, incident_key, dict(
-        current, contained=bool(contained)), cause_event_id=cause_event_id)
+        current, recovered=True), cause_event_id=cause_event_id)
 
 
 def set_browser_state(session, key, value, cause_event_id=None):

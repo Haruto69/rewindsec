@@ -156,8 +156,16 @@
     function ofClass(name) {
       return decisions.filter(function (d) { return d.klass === name; });
     }
+    // A real (server-derived) decision's ``id`` is now occurrence-scoped --
+    // two occurrences of the same recurring decision class (an MFA approval,
+    // a shared-portal credential submission) get distinct ids -- while
+    // ``decisionId`` still carries the semantic class every occurrence
+    // shares. Fixture runs (``exampleRun``) carry no ``decisionId`` at all,
+    // so falling back to ``d.id`` keeps this demonstration scoring working
+    // for both.
+    function decisionClass(d) { return d.decisionId || d.id; }
     function has(id) {
-      return decisions.some(function (d) { return d.id === id; });
+      return decisions.some(function (d) { return decisionClass(d) === id; });
     }
 
     var hostile = (run.hostileDelivered || []).length + (run.hostilePrompts || 0);
@@ -195,7 +203,7 @@
       out.incident_response = null;
     } else {
       var reports = decisions.filter(function (d) {
-        return /-report$/.test(d.id);
+        return /-report$/.test(decisionClass(d));
       }).length;
       var value = 100 * Math.min(reports, hostile) / hostile;
       if (has('d-ransom-isolate')) { value += 15; }
@@ -220,7 +228,7 @@
       var accuracy = started === 0 ? 100 : (100 * done / started);
       accuracy -= 25 * over;
       accuracy -= 20 * decisions.filter(function (d) {
-        return d.id === 'd-mfa-deny-legit';
+        return decisionClass(d) === 'd-mfa-deny-legit';
       }).length;
       out.operational_accuracy = clamp(accuracy, 0, 100);
     }
@@ -242,7 +250,9 @@
   }
 
   function reportedAny(decisions) {
-    return decisions.some(function (d) { return /-report$/.test(d.id); });
+    return decisions.some(function (d) {
+      return /-report$/.test(d.decisionId || d.id);
+    });
   }
 
   function overallScore(scores, weights) {
@@ -466,15 +476,81 @@
   // Boot
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // Real RewindSec 2.0 scoring (Batch 4), when the run has it
+  // -----------------------------------------------------------------------
+
+  /* ``run.scoring`` is the server-derived block from
+   * ``rewindsec.workstation.debrief.debrief_document`` /
+   * ``rewindsec.scoring.state.learner_view``. ``available`` is true for any
+   * session created after the scoring versions existed, whatever its
+   * outcome; ``legacy`` marks a run from before Batch 4, which never
+   * receives a retroactive score. */
+  function realScoring(run) {
+    return run && run.scoring && run.scoring.available ? run.scoring : null;
+  }
+
+  function scoresFromReal(real) {
+    var out = {};
+    real.dimensions.forEach(function (dim) { out[dim.id] = dim.score; });
+    return out;
+  }
+
+  function renderRealDimensions(real) {
+    qs('#pw-res-dims').innerHTML = real.dimensions.map(function (dim) {
+      var value = dim.score;
+      var applicable = dim.applicable;
+      var evidence = (dim.evidence || []).map(function (item) {
+        return '<li class="is-' + esc(item.direction) + '">' + esc(item.text) + '</li>';
+      }).join('');
+      return '<div class="pw-dim">'
+        + '<div class="pw-dim-top"><b>' + esc(dim.label) + '</b>'
+        + (applicable
+            ? '<span class="pw-dim-value">' + value + '</span>'
+            : '<span class="pw-dim-value is-na">N/A</span>')
+        + '</div>'
+        + '<p>' + esc(dim.description) + '</p>'
+        + (applicable
+            ? (evidence ? '<ul class="pw-dim-evidence">' + evidence + '</ul>' : '')
+            : '<p class="pw-xsmall pw-muted">' + esc(dim.na_reason
+                || 'Nothing in this session exercised it, so it is excluded '
+                   + 'from the overall figure rather than counted as zero.')
+              + '</p>')
+        + (applicable
+            ? '<div class="pw-meter ' + meterClass(value) + '"><span style="width:'
+              + value + '%"></span></div>'
+            : '<div class="pw-meter"><span style="width:0"></span></div>')
+        + '</div>';
+    }).join('');
+  }
+
+  function renderScoringNote(real) {
+    var existing = qs('#pw-res-scoring-note');
+    if (existing) { existing.parentNode.removeChild(existing); }
+    var note = document.createElement('p');
+    note.id = 'pw-res-scoring-note';
+    note.className = 'pw-xsmall pw-muted';
+    note.style.marginTop = '.5rem';
+    note.textContent = real
+      ? real.note + ' (' + real.rubric_version + ')'
+      : 'These figures are an authored demonstration only -- this run '
+        + 'predates RewindSec 2.0\'s real scoring rubric and was never '
+        + 'scored by it.';
+    var overall = qs('#pw-res-overall');
+    if (overall && overall.parentNode) { overall.parentNode.appendChild(note); }
+  }
+
   fetch('/prototype/api/world', { headers: { Accept: 'application/json' } })
     .then(function (response) { return response.json(); })
     .then(function (world) {
       var run = loadRun();
-      var scores = score(run);
-      var overall = overallScore(scores, world.demo_weights);
+      var real = realScoring(run);
+      var scores = real ? scoresFromReal(real) : score(run);
+      var overall = real ? real.overall : overallScore(scores, world.demo_weights);
 
       renderHero(run, overall, world);
-      renderDimensions(world, scores);
+      if (real) { renderRealDimensions(real); } else { renderDimensions(world, scores); }
+      renderScoringNote(real);
       renderTimeline(run);
       renderEvidence(run);
       renderChains(run, world);

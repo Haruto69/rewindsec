@@ -131,7 +131,10 @@ def test_the_debrief_is_only_reachable_once_the_attempt_has_finished(client):
     response = client.get(DEBRIEF)
     assert response.status_code == 200
     debrief = response.get_json()["debrief"]
-    assert debrief["scoring"]["engine"] == "none"
+    # Batch 4: a session started through this route now carries a real,
+    # versioned scoring result once it has finished.
+    assert debrief["scoring"]["available"] is True
+    assert debrief["scoring"]["rubric_version"]
 
 
 def test_the_content_endpoint_is_closed_while_an_attempt_is_running(client):

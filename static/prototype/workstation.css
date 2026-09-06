@@ -1038,6 +1038,35 @@
 }
 .pw-filepreview p { margin: 0 0 .6em; }
 
+/* The read-only synthetic document viewer (Batch 4). Same surface language
+ * as ``.pw-filepreview`` -- it is one more panel under the file's metadata,
+ * not a new modal or a redesign of the Files app. */
+.pw-docviewer {
+  margin-top: var(--s-5); padding: var(--s-5) var(--s-6); background: var(--p-surface-2);
+  border: 1px solid var(--p-line); border-radius: var(--p-r-sm);
+  font-size: var(--t-sm); color: var(--p-ink-2); line-height: 1.6;
+  max-height: 22rem; overflow-y: auto;
+}
+.pw-docviewer-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  margin-bottom: var(--s-4); color: var(--p-ink);
+}
+.pw-docviewer-body h4, .pw-docviewer-body h5, .pw-docviewer-body h6 {
+  margin: var(--s-4) 0 var(--s-2); color: var(--p-ink);
+}
+.pw-docviewer-body p { margin: 0 0 .6em; }
+.pw-docviewer-body ul { margin: 0 0 .8em; padding-left: 1.2em; }
+.pw-docviewer-kv { display: grid; grid-template-columns: 9rem minmax(0, 1fr);
+  gap: var(--s-2) var(--s-5); margin: 0 0 var(--s-4); }
+.pw-docviewer-kv dt { color: var(--p-muted); }
+.pw-docviewer-kv dd { margin: 0; overflow-wrap: anywhere; }
+.pw-docviewer-table { overflow-x: auto; margin-bottom: var(--s-4); }
+.pw-docviewer-table table { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+.pw-docviewer-table th, .pw-docviewer-table td {
+  text-align: left; padding: .35em .6em; border-bottom: 1px solid var(--p-line);
+}
+.pw-docviewer-table th { color: var(--p-muted); font-weight: 600; }
+
 @media (max-width: 720px) {
   .pw-filehead, .pw-filerow { grid-template-columns: 20px minmax(0, 1fr) 4.6rem; }
   .pw-filerow-meta.is-optional, .pw-filehead span.is-optional { display: none; }
