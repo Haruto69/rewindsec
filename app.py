@@ -975,20 +975,67 @@ app.register_blueprint(create_study_blueprint(
     study_settings))
 
 
-# --- RewindSec 2.0 UI prototype (UI-first product gate) --------------------
-# A fixture-backed presentation prototype whose only purpose is to let the
-# product be judged by hand before the backend batches start. It is not part
-# of the v1 system and it is not part of the RewindSec 2.0 backend: it runs no
-# simulation, persists nothing, touches no database, no sandbox, no telemetry
-# and no deterministic core. Every route it adds is a GET under /prototype.
+# --- RewindSec 2.0 learner workstation (Batch 2) ---------------------------
+# Batch 2 replaced the UI prototype's fixture-owned runtime with real
+# server-authoritative state. The learner workstation now runs on a persisted
+# SimulationSession: actions are POSTed, validated and applied on the server,
+# consequences are scheduled on the session's own deterministic scheduler, and
+# the browser renders a learner-safe projection it cannot forge.
 #
-# This is the whole attachment surface. Removing the prototype means deleting
-# this block, ``rewindsec/prototype/``, ``templates/prototype/`` and
-# ``static/prototype/`` -- nothing else in the application refers to it.
+# What is still fixture-backed, deliberately, is the trainer console and the
+# numeric part of the results screen. Those are Batches 5 and 4.
+#
+# The wiring below is the whole attachment surface: this block,
+# ``rewindsec/prototype/``, ``rewindsec/workstation/``, ``templates/prototype/``
+# and ``static/prototype/``. The three 2.0 tables are created alongside the
+# application's own in ``init_db`` and share the same database; they are
+# separately named (``rewindsec2_*``) so no query can mix 2.0 rows with v1 ones.
 
+from rewindsec.persistence.sqlalchemy_adapter import (  # noqa: E402
+    SqlAlchemySessionRepository)
 from rewindsec.prototype.routes import create_prototype_blueprint  # noqa: E402
+from rewindsec.workstation.service import WorkstationService  # noqa: E402
+from rewindsec.workstation.updates import UpdateBroker  # noqa: E402
 
-app.register_blueprint(create_prototype_blueprint())
+#: One broker per process. It holds revision numbers, not content, and is not
+#: authoritative for anything: losing it loses live updates until the next
+#: reconnect, never a fact.
+WORKSTATION_UPDATES = UpdateBroker()
+
+
+def workstation_repository():
+    """The RewindSec 2.0 session repository, over the application's engine.
+
+    Reuses the SQLAlchemy engine Flask-SQLAlchemy already manages rather than
+    opening a second connection pool. The adapter itself stays Flask-free --
+    it is handed an Engine and nothing else -- which is why it can be tested
+    directly against an in-memory database with no app context.
+    """
+    repository = getattr(app, "_rewindsec2_repository", None)
+    if repository is None:
+        repository = SqlAlchemySessionRepository(db.engine)
+        app._rewindsec2_repository = repository
+    return repository
+
+
+def workstation_service():
+    """The configured WorkstationService for this app. One per process.
+
+    The service is stateless between requests -- everything a session knows is
+    in the database, and simulation time advances only by explicit, stated
+    amounts -- so this cache is about not rebuilding an engine, nothing more.
+    Losing it changes no behaviour.
+    """
+    service = getattr(app, "_rewindsec2_service", None)
+    if service is None:
+        service = WorkstationService(workstation_repository(),
+                                     updates=WORKSTATION_UPDATES)
+        app._rewindsec2_service = service
+    return service
+
+
+app.register_blueprint(create_prototype_blueprint(
+    service_factory=workstation_service, updates=WORKSTATION_UPDATES))
 
 
 def record_event(event_type, scenario_id=None, source=None, target=None,
@@ -1213,6 +1260,12 @@ def init_db(force_reseed=False):
     deliberately.
     """
     db.create_all()
+    # The RewindSec 2.0 session tables live on their own MetaData, so
+    # ``db.create_all()`` does not know about them. Created here with
+    # ``checkfirst``, which adds them to an existing database without touching
+    # a single historical table and without requiring anyone to delete
+    # simulator.db.
+    workstation_repository().create_schema()
 
     already_seeded = bool(Product.query.first()) and bool(DemoFile.query.first())
     if already_seeded and not force_reseed:

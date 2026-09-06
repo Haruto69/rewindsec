@@ -1,10 +1,20 @@
-"""Flask routes for the RewindSec 2.0 UI prototype.
+"""Flask routes for the RewindSec 2.0 learner and trainer surfaces.
 
-Every route here is a ``GET``. That is deliberate rather than incidental: the
-prototype has no server-side state to change, so it needs no state-changing
-method, and giving it one would create the impression that something is being
-persisted. The application's global CSRF gate only applies to unsafe methods
-(see ``security.init_csrf``), so this blueprint adds no exemption of any kind.
+Batch 2 changed what this blueprint is. It began as a GET-only presentation
+prototype whose world was a fixture document. It now also mounts the learner
+workstation API (:mod:`rewindsec.prototype.api`), which is server-authoritative
+and does persist: a learner action is a ``POST`` that reaches a real
+:class:`~rewindsec.domain.session.SimulationSession` through the workstation
+application layer.
+
+Two things follow, and both are deliberate:
+
+* The state-changing routes are all ``POST`` under ``/prototype/api/``, so the
+  application's global CSRF gate (``security.init_csrf``) covers every one of
+  them with no exemption of any kind. Nothing here weakens it.
+* The **trainer** surfaces are still fixture-backed, and the results screen
+  still computes its demonstration numbers in the browser. Those belong to
+  Batches 4 and 5. What is real after this batch is the learner workstation.
 
 The blueprint is mounted under one prefix and owns one template directory and
 one static directory. Deleting this package, ``templates/prototype/``,
@@ -15,9 +25,10 @@ Nothing here touches the database, the sandbox, the telemetry ledger, the
 deterministic core, or any v1 module.
 """
 
-from flask import Blueprint, abort, jsonify, render_template, request
+from flask import Blueprint, abort, jsonify, render_template, request, session
 
 from rewindsec.prototype import fixtures
+from rewindsec.prototype.api import SESSION_KEY, register_workstation_api
 
 #: Endpoints a learner actually sits in front of during a session.
 #:
@@ -35,27 +46,64 @@ LEARNER_ENDPOINTS = frozenset({
 })
 
 
-def create_prototype_blueprint():
+def create_prototype_blueprint(service_factory=None, updates=None):
     """Build the ``/prototype`` blueprint.
 
     A factory rather than a module-level object so the application decides
-    when -- and whether -- the prototype exists at all.
+    when -- and whether -- these surfaces exist at all.
+
+    ``service_factory`` and ``updates`` wire the learner workstation API to a
+    configured :class:`~rewindsec.workstation.service.WorkstationService` and
+    its update broker. Passed in rather than imported so this module never
+    reaches for the application object, and so a test can mount the API on a
+    service backed by a throwaway database.
     """
     bp = Blueprint("prototype", __name__, url_prefix="/prototype")
 
+    if service_factory is not None:
+        register_workstation_api(bp, service_factory, updates)
+
     # -- shared template context ------------------------------------------
+
+    #: What each screen is actually backed by, stated on the screen itself.
+    #:
+    #: Batch 2 made the learner workstation real, and left the trainer console
+    #: and the numeric part of the debrief as authored demonstrations. One
+    #: banner saying "prototype" everywhere would now be wrong in one
+    #: direction on the workstation and right in the other on the trainer, so
+    #: it says which is which. A reviewer must never have to guess whether
+    #: what they are looking at is implemented.
+    BANNERS = {
+        "workstation": (
+            "RewindSec 2.0 — this workstation runs on a real persisted "
+            "simulation session. Scoring, the threat engine and the trainer "
+            "records are not implemented yet."),
+        "results": (
+            "The timeline, decisions, consequence chains and evidence on this "
+            "page come from your real session. The numeric scores are an "
+            "authored demonstration, not RewindSec 2.0 scoring."),
+        "trainer": (
+            "Trainer console — fixture data. Student, group, assessment and "
+            "analytics records are not implemented yet."),
+        "entry": (
+            "RewindSec 2.0. Entering the workstation creates a real, "
+            "persisted training session you can leave and come back to."),
+    }
+
+    def _banner_for(endpoint):
+        if endpoint == "prototype.workstation":
+            return BANNERS["workstation"]
+        if endpoint == "prototype.results":
+            return BANNERS["results"]
+        if endpoint == "prototype.entry":
+            return BANNERS["entry"]
+        return BANNERS["trainer"]
 
     @bp.context_processor
     def _prototype_context():
-        """Values every prototype template needs.
-
-        ``prototype_banner`` is rendered on every screen. A reviewer must
-        never be able to mistake one of these pages for implemented product.
-        """
+        """Values every template under this blueprint needs."""
         return {
-            "prototype_banner": (
-                "UI prototype — fixture data. No simulation engine, scoring "
-                "engine or persistence is running behind these screens."),
+            "prototype_banner": _banner_for(request.endpoint),
             "org": fixtures.world.ORGANIZATION,
             "learner": fixtures.world.LEARNER,
             "integrity_scope": (
@@ -104,13 +152,20 @@ def create_prototype_blueprint():
     def workstation():
         """The synthetic workstation shell.
 
-        Renders an empty shell; the world arrives from ``/prototype/api/world``
-        and is drawn by ``static/prototype/workstation.js``. That is the same
-        shape the production client will have -- ask the server what the world
-        is, then render it -- with a fixture document standing in for the
-        simulation.
+        Renders an empty shell. Every fact in it arrives from
+        ``/prototype/api/session``, projected from a real persisted
+        :class:`~rewindsec.domain.session.SimulationSession`, and is drawn by
+        ``static/prototype/workstation.js``.
+
+        ``has_session`` is a boot hint and nothing more: it saves the client
+        from probing an endpoint that answers 404 on every first entry, which
+        would put a red line in the console of an otherwise healthy page. It
+        carries no simulation state, and the client does not trust it -- if it
+        says yes and the session has since gone, the ordinary "no session"
+        path still runs.
         """
-        return render_template("prototype/workstation.html")
+        return render_template("prototype/workstation.html",
+                               has_session=bool(session.get(SESSION_KEY)))
 
     @bp.route("/results")
     def results():
@@ -215,12 +270,31 @@ def create_prototype_blueprint():
 
     @bp.route("/api/world")
     def api_world():
-        """The whole synthetic world as one document.
+        """The authored content document, for the results and trainer screens.
 
-        This endpoint is the seam. Production replaces the *contents* with
-        real simulation state and adds an event stream beside it; the client
-        contract -- the server says what the world is -- does not change.
+        This was the workstation's world in the UI prototype. It is not any
+        more: the workstation now reads
+        ``/prototype/api/session``, which is projected from a real
+        :class:`~rewindsec.domain.session.SimulationSession` and carries no
+        authored ground truth.
+
+        What is left here still carries the ``analysis`` blocks -- decision
+        classes, dispositions, evidence models -- because the debrief screen
+        renders from them. So it is **closed while a session is running**. A
+        learner in the middle of an attempt cannot read the answer key by
+        opening a second tab, and the results screen, which runs after the
+        attempt has ended, is unaffected.
         """
+        if session.get(SESSION_KEY) and service_factory is not None:
+            try:
+                simulation = service_factory().load(session[SESSION_KEY])
+            except Exception:
+                simulation = None
+            if simulation is not None and simulation.is_active:
+                return jsonify({"error": {
+                    "code": "forbidden",
+                    "message": "Not available while a session is running.",
+                }}), 403
         return jsonify(fixtures.learner_snapshot())
 
     @bp.route("/api/assignment-provenance")

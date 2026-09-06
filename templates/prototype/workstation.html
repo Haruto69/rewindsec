@@ -20,7 +20,7 @@
 {% block skip_target %}pw-workarea{% endblock %}
 
 {% block body %}
-<div class="pw-ws" id="pw-ws">
+<div class="pw-ws" id="pw-ws" data-has-session="{{ 1 if has_session else 0 }}">
 
   <div class="pw-protobanner" role="note" id="pw-ws-banner">
     <strong>Prototype</strong>

@@ -234,6 +234,82 @@ adversarial unit and resume-determinism suites
 No application content, threat-family engine, scoring, or UI wiring is part of
 this batch — see the batch's own completion report for the full boundary.
 
+
+### Batch 2: workstation backend integration
+
+`rewindsec/workstation/` is the application layer between the domain and the
+HTTP adapter. It is the batch in which the learner-facing product stopped
+being a presentation prototype: the workstation now runs on a persisted
+`SimulationSession`, and the browser is no longer authoritative for any
+factual simulation state.
+
+| Path | Role |
+|---|---|
+| `rewindsec/workstation/content/` | The authored bootstrap workplace (`world.py`, `scenario.py`, moved here from `rewindsec/prototype/`, plus `index.py`). One fixed authored scenario a session is *seeded from* — explicitly **not** the Batch 3 generator. |
+| `rewindsec/workstation/bootstrap.py` | Seeds one session's `WorldState` and `ContextLedger` from that content, including every inspection-only fact in its unobserved state. |
+| `rewindsec/workstation/actions.py` | The closed, allowlisted learner-action vocabulary and its strict request parser. Unknown keys, unknown actions, bool-as-int, NaN/infinity and over-long payloads are rejected rather than ignored. |
+| `rewindsec/workstation/service.py` | `WorkstationService`: the only thing that changes a session. Validates lifecycle and target, records the `LearnerAction`, marks observed facts, mutates the world, records events and consequences, persists under optimistic concurrency, projects. It reads no real clock: simulation time advances only by explicitly stated amounts (`TICK_QUANTUM_MS` per heartbeat, or a caller-named amount from the development tooling). |
+| `rewindsec/workstation/worldops.py` | The primitive world verbs shared by the action handlers and the consequence engine. |
+| `rewindsec/workstation/consequences.py` | The authored consequence chains, scheduled on the session's own `EventScheduler` at mode-scaled simulation delays and applied when their events fire. |
+| `rewindsec/workstation/projection.py` | The learner-safe view model. An allowlist, not a filter: the wall between authored ground truth and the browser. |
+| `rewindsec/workstation/debrief.py` | The post-session factual debrief, refused while a session is active. |
+| `rewindsec/workstation/updates.py` | `UpdateBroker`: a bounded, in-process revision broker behind SSE. Carries revision numbers, never content. |
+| `rewindsec/workstation/seeds.py`, `clock.py`, `errors.py` | Root-seed sources (injectable), the display clock, and the typed error vocabulary the HTTP adapter maps onto status codes. |
+| `rewindsec/prototype/api.py` | The Flask adapter. The only module that knows what a request or a status code is. |
+
+Rules for anything added here:
+
+* **Framework-free application layer.** Nothing under `rewindsec/workstation/`
+  may import Flask, SQLAlchemy, Werkzeug, Jinja, `app`, `security`, `sandbox`
+  or any v1 module; nor anything that could open a socket or start a
+  subprocess. It raises `WorkstationError` subclasses and the adapter maps
+  them onto status codes.
+* **One dependency direction.** Flask adapter → workstation → domain →
+  persistence. The adapter may not import `rewindsec.domain` or
+  `rewindsec.persistence` directly, because a route that reached the aggregate
+  could mutate the world without passing validation.
+* **No ambient nondeterminism in simulation decisions.** Randomness comes from
+  the session's `SeededRandom`; simulation time from its `SimClock`. The two
+  documented exceptions are minting a root seed and minting a session id, both
+  infrastructure and both injectable.
+* **No wall clock at all, with no exemption.** No module in
+  `rewindsec/workstation/` imports `time`, `datetime` or `calendar` or calls
+  into one. Simulation time moves only when an explicit application operation
+  says so, by an amount that is stated rather than measured, so a session's
+  state is a pure function of its seed and its recorded inputs — identical
+  across machine speed, request latency, sleeps, process restarts and browser
+  timer cadence.
+* **A session is replaced only on purpose.** Rendering a page or reading a
+  session never ends, creates, or re-focuses one, and query parameters carry
+  no authority over a session that already exists; `POST /api/session/start`
+  is refused while one is live, and `POST /api/session/new` completes the
+  outgoing attempt on the record before opening another.
+* **The projection may not read authored ground truth.** It never calls the
+  `is_hostile_*` predicates and never names an `analysis` block.
+* **A download never replaces a synthetic file.** The name a downloaded file
+  is saved under is resolved on the server from world state alone -- the
+  client cannot name it -- and a name already in that folder (compared
+  case-insensitively) yields the first free `name (n).ext` instead of an
+  overwrite. Nothing on the host filesystem is read or written.
+
+Enforced by `tests/test_rewindsec2_workstation_boundaries.py`, alongside the
+leakage, action, HTTP, resume, SSE, determinism-under-real-time,
+session-lifecycle and download-collision suites
+(`tests/test_rewindsec2_workstation_*.py`).
+
+**What is still fixture-backed, deliberately:** the trainer console (Batch 5)
+and the numeric scores on the results screen (Batch 4). The results page's
+timeline, decisions, causal consequence tree and evidence counts are real and
+come from the persisted session; its six dimension figures are an authored
+browser-side demonstration, labelled as such on the screen, in the API
+(`debrief.scoring.engine == "none"`) and here. **They are not RewindSec 2.0
+scoring and must never be cited as a measurement.**
+
+**Persistence:** the three Batch 1 tables (`rewindsec2_*`) are created
+alongside the application's own in `init_db()` with `checkfirst`, so they are
+added to an existing database without touching a single historical table. No
+v1 table is read, written or migrated.
+
 ---
 
 ## 7. Quick reference
@@ -245,3 +321,4 @@ this batch — see the batch's own completion report for the full boundary.
 | v1 study artifacts (§4) | Frozen. Never extended or repointed for 2.0. |
 | v1 evaluation harnesses and results (§5) | Frozen. Never re-run against 2.0 and reported as continuous. |
 | RewindSec 2.0 (§6) | New names, new tables, new harness, framework-free deterministic core. |
+| RewindSec 2.0 results screen | Timeline, decisions, consequence chains and evidence are real session facts. The six dimension scores are an authored demonstration until Batch 4. |

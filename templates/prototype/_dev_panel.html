@@ -46,34 +46,23 @@
         <button type="button" id="pw-dev-next">Deliver next</button>
         <button type="button" id="pw-dev-all">Deliver all</button>
       </div>
-      <label class="pw-dev-check" style="margin-top:.45rem">
-        <input type="checkbox" id="pw-dev-fast">
-        Compress consequence delays
-      </label>
+      <p class="pw-dev-note">Releases the next authored arrival immediately.
+      The server does the delivering, on the same path the timeline uses, so
+      nothing arrives that could not have arrived on its own.</p>
     </div>
 
     <div class="pw-dev-group" data-dev-scope="workstation">
-      <h3>Inject</h3>
+      <h3>Advance simulation time</h3>
       <div class="pw-dev-row">
-        <button type="button" data-dev-inject="notification">Notification</button>
-        <button type="button" data-dev-inject="mfa">MFA prompt</button>
-        <button type="button" data-dev-inject="message">Coworker message</button>
-        <button type="button" data-dev-inject="legit-mfa">Legitimate MFA</button>
+        <button type="button" data-dev-advance="10000">+10s</button>
+        <button type="button" data-dev-advance="30000">+30s</button>
+        <button type="button" data-dev-advance="120000">+2m</button>
       </div>
-    </div>
-
-    <div class="pw-dev-group" data-dev-scope="workstation">
-      <h3>Force a consequence chain</h3>
-      <div class="pw-dev-row">
-        <button type="button" data-dev-chain="d-phish-credentials">Credential</button>
-        <button type="button" data-dev-chain="d-ransom-open">File</button>
-        <button type="button" data-dev-chain="d-mfa-approve-hostile">MFA</button>
-        <button type="button" data-dev-chain="d-bec-authorize">Payment</button>
-        <button type="button" data-dev-chain="d-report-legitimate">Over-report</button>
-        <button type="button" data-dev-chain="d-mfa-deny-legit">Denied own sign-in</button>
-      </div>
-      <p class="pw-dev-note">Applies the decision and plays its authored
-      chain, exactly as the corresponding learner action would.</p>
+      <p class="pw-dev-note">Moves the server clock forward and fires whatever
+      becomes due, in the order and at the simulation times it was already
+      scheduled for. It compresses waiting, never causality. There is no
+      control here that invents a consequence: to see a chain, take the
+      decision that causes it.</p>
     </div>
 
     <div class="pw-dev-group" data-dev-scope="learner">

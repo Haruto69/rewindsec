@@ -1,30 +1,35 @@
-/* RewindSec 2.0 UI prototype — the synthetic workstation.
+/* RewindSec 2.0 — the synthetic workstation client.
  *
  * WHAT THIS IS
  * ------------
- * A presentation prototype. It fetches one authored document from
- * /prototype/api/world and renders a workplace from it. Learner actions
- * mutate a client-side copy of that document and play back *server-authored*
- * consequence chains on a timer.
+ * A renderer and an input surface. It asks the server what the world is,
+ * draws it, and sends back semantic actions — "open this message", "approve
+ * this request". That is the whole of its job.
  *
- * WHAT THIS IS NOT
- * ----------------
- * It is not the simulation. There is no session, no world model, no context
- * ledger, no hazard scheduler, no evidence graph, no scoring engine and no
- * persistence. Nothing here should be read as evidence that any of those
- * work, and nothing here should be carried into the backend batches as an
- * implementation.
+ * WHAT IT IS NOT
+ * --------------
+ * It is not authoritative for anything factual. There is no world model here,
+ * no consequence engine, no timers that decide what happens, and no copy of
+ * the simulation to diverge from the server's. Every consequential change is
+ * a server decision, arrives as a new snapshot, and survives a refresh because
+ * it was persisted before this file ever heard about it.
  *
- * THE SEAM
- * --------
- * Consequences are never invented in this file. Every effect comes from
- * `WORLD.chains`, which the server authored, keyed by the decision that
- * causes it, with its causal parent and its delay already stated. Production
- * replaces "fetch a document, then play its chains locally" with "subscribe
- * to the server's event stream"; the renderer's contract — draw what the
- * server says the world is — is unchanged. That is deliberate, because the
- * one design assumption this prototype must not bake in is that important
- * consequences can stay in client JavaScript.
+ * THE THREE KINDS OF STATE
+ * ------------------------
+ *   SNAP  the server's authoritative, learner-safe projection. Replaced
+ *         wholesale on every update. Never edited in place.
+ *   APP   per-application view state: which folder, which row is selected,
+ *         an unsent draft. Presentation. Losing it costs nothing.
+ *   WIN   window geometry, z-order, open/closed. Presentation. Deliberately
+ *         not persisted as simulation truth: where a window sits is not a
+ *         fact about the workplace.
+ *
+ * WHY THE CLIENT NEVER APPLIES A CONSEQUENCE OPTIMISTICALLY
+ * ---------------------------------------------------------
+ * A button may show that it was pressed. Nothing beyond that changes until
+ * the server has accepted the action and returned the new truth. If the
+ * request fails, the screen still shows what is actually true rather than
+ * what we hoped would be.
  */
 (function () {
   'use strict';
@@ -41,15 +46,13 @@
   function esc(value) {
     return String(value === undefined || value === null ? '' : value)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function icon(name, extra) {
     return '<svg aria-hidden="true"' + (extra ? ' ' + extra : '')
       + '><use href="#i-' + name + '"></use></svg>';
   }
-
-  function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
   function clamp(value, low, high) {
     return Math.max(low, Math.min(high, value));
@@ -59,15 +62,25 @@
     return new URLSearchParams(window.location.search).get(name);
   }
 
+  function csrfToken() {
+    var meta = qs('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute('content') : '';
+  }
+
   // =========================================================================
-  // Session state
+  // State
   // =========================================================================
 
-  var WORLD = null;   // the authored document from the server
-  var S = null;       // this run's mutable copy plus what the learner has done
-  var WIN = {};       // window geometry / open / focus state
-  var APP = {};       // per-application view state, survives close and reopen
-  var timers = [];
+  var SNAP = null;    // the server's projection. The only factual truth here.
+  var WIN = {};       // window geometry / open / focus. Presentation only.
+  var APP = {};       // per-application view state. Presentation only.
+  var NOTICE = null;  // transient server notice (a Practice confirmation)
+  var seenNotifications = {};
+  var pendingRequests = 0;
+  var stream = null;
+  var tickTimer = null;
+  var noteSaveTimer = null;
+  var ended = false;
 
   var APPS = {
     mail: { label: 'Mail', icon: 'mail', w: 1020, h: 660 },
@@ -87,17 +100,12 @@
     { id: 'deleted', label: 'Deleted', icon: 'trash' }
   ];
 
-  /* Which authored decision a report/reply/download maps to. Kept as data so
-   * the mapping is inspectable rather than buried in branches. */
-  var REPORT_DECISION = {
-    'm-payroll-restructure': 'd-phish-report',
-    'm-rate-card': 'd-ransom-report',
-    'm-invoice-amend': 'd-bec-report',
-    'm-invoice-confirm': 'd-bec-report'
+  var FOCUS_LABELS = {
+    phishing: 'Phishing', ransomware: 'Ransomware', mfa: 'MFA',
+    bec: 'BEC', mixed: 'Mixed'
   };
-  var REPLY_DECISION = {
-    'm-headcount': 'd-task-headcount-done',
-    'm-invoice-amend': 'd-bec-reply'
+  var MODE_LABELS = {
+    practice: 'Practice', simulation: 'Simulation', assessment: 'Assessment'
   };
 
   function defaultAppState() {
@@ -107,574 +115,250 @@
         linkShown: null, composing: null, draft: '', mobileDetail: false
       },
       browser: { tabs: [], active: 0 },
-      files: { location: 'loc-desktop', selected: null, renaming: false },
-      messages: { conversation: 'conv-tom-brennan', draft: '', mobileDetail: false },
-      authenticator: { details: {}, historyOpen: false },
-      directory: { search: '', selected: null, call: null, mobileDetail: false },
+      files: { location: null, selected: null, renaming: false },
+      messages: { conversation: null, draft: '', mobileDetail: false },
+      authenticator: { details: {} },
+      directory: { search: '', selected: null, mobileDetail: false },
       notes: { selected: null }
     };
   }
 
-  function modeFlags(modeId) {
-    for (var i = 0; i < WORLD.modes.length; i += 1) {
-      if (WORLD.modes[i].id === modeId) { return WORLD.modes[i].flags; }
-    }
-    return WORLD.modes[1].flags;
-  }
+  function flags() { return (SNAP && SNAP.session.flags) || {}; }
 
-  function modeLabel(modeId) {
-    for (var i = 0; i < WORLD.modes.length; i += 1) {
-      if (WORLD.modes[i].id === modeId) { return WORLD.modes[i].label; }
-    }
-    return modeId;
-  }
+  // =========================================================================
+  // Talking to the server
+  // =========================================================================
+  //
+  // One request shape for everything. Each carries the revision the screen was
+  // built from, so a submission the world has already moved past is refused by
+  // the server instead of being applied twice.
 
-  function buildState(focus, mode, assessmentId) {
-    var mail = [];
-    WORLD.mail.forEach(function (message) {
-      var copy = clone(message);
-      copy.delivered = copy.arrival === 'opening';
-      copy.read = copy.arrival === 'opening' ? !copy.unread : false;
-      copy.reported = false;
-      copy.repliedAt = null;
-      copy.forwarded = false;
-      mail.push(copy);
+  function request(path, options) {
+    var opts = options || {};
+    var init = {
+      method: opts.method || 'GET',
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin'
+    };
+    if (opts.body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.headers['X-CSRF-Token'] = csrfToken();
+      init.body = JSON.stringify(opts.body);
+    }
+    return fetch(path, init).then(function (response) {
+      return response.json().catch(function () { return {}; })
+        .then(function (payload) {
+          if (!response.ok) {
+            var error = new Error((payload.error && payload.error.message)
+              || 'The workstation could not complete that.');
+            error.status = response.status;
+            error.code = payload.error && payload.error.code;
+            error.detail = (payload.error && payload.error.detail) || {};
+            throw error;
+          }
+          return payload;
+        });
     });
+  }
 
-    var files = clone(WORLD.files);
+  var noticeTimer = null;
 
-    return {
-      focus: focus,
-      mode: mode,
-      assessmentId: assessmentId || null,
-      flags: modeFlags(mode),
-      startedAt: Date.now(),
-      paused: false,
-      ended: false,
-      fast: false,
+  /* Adopt the server's answer as the new truth.
+   *
+   * The revision is the whole change-detection mechanism: it moves on every
+   * accepted mutation and on nothing else, so an unchanged revision means an
+   * unchanged world and there is nothing to redraw. That matters because the
+   * tick runs every few seconds and most ticks change nothing — redrawing
+   * anyway would throw away the caret in a note, the selection in a search
+   * box and the scroll position of every list, several times a minute, for
+   * no reason at all. */
+  function adopt(payload) {
+    if (payload && payload.snapshot) {
+      var previous = SNAP;
+      var changed = !previous
+        || payload.snapshot.session.revision !== previous.session.revision;
+      SNAP = payload.snapshot;
+      syncClock();
+      if (payload.notice && payload.notice.kind === 'confirmation') {
+        // Practice, and only Practice, confirms a good decision. The text is
+        // the server's; how long it stays on screen is presentation, so it
+        // lives here and is not persisted anywhere.
+        NOTICE = { text: payload.notice.text };
+        if (noticeTimer) { window.clearTimeout(noticeTimer); }
+        noticeTimer = window.setTimeout(function () {
+          NOTICE = null;
+          render();
+        }, 12000);
+        changed = true;
+      }
+      if (changed) {
+        syncToasts();
+        render();
+      }
+    }
+    return payload;
+  }
 
-      mail: mail,
-      mailRule: null,
-      files: files,
-      notes: clone(WORLD.notes),
-      conversations: clone(WORLD.conversations),
-      authHistory: clone(WORLD.auth_history),
-      prompts: [],                 // live MFA prompts
-      notifications: WORLD.notifications.map(function (n) {
-        var copy = clone(n);
-        copy.unread = false;
-        return copy;
-      }),
+  function refresh() {
+    return request('/prototype/api/session').then(adopt);
+  }
 
-      tasks: (function () {
-        var out = {};
-        WORLD.tasks.forEach(function (task) { out[task.id] = clone(task); });
-        return out;
-      }()),
+  /* Send one semantic action. The server decides what it means.
+   *
+   * On a stale revision the world has moved on since this screen was drawn —
+   * usually because a consequence landed while the learner was reading. The
+   * response is refused, nothing is applied twice, and the recovery is to
+   * take the authoritative state and, for an observational action only,
+   * try once more. A consequential action is never retried automatically:
+   * repeating "release the payment" on the learner's behalf is not a
+   * reconciliation, it is a second decision. */
+  var OBSERVATIONAL = {
+    'mail.open': 1, 'mail.inspect_headers': 1, 'mail.inspect_link': 1,
+    'mail.inspect_attachment': 1, 'mail.open_link': 1, 'browser.navigate': 1,
+    'files.inspect': 1, 'notifications.open': 1, 'notifications.mark_read': 1,
+    'notes.create': 1, 'notes.open': 1, 'notes.save': 1, 'notes.delete': 1,
+    'auth.inspect_request': 1, 'auth.inspect_history': 1, 'messages.open': 1,
+    'directory.open': 1, 'session.acknowledge': 1
+  };
 
-      queue: (WORLD.timelines[focus] || WORLD.timelines.mixed).slice(),
-      queueIndex: 0,
-      awaitingResolution: null,
+  function send(action, target, params, retried) {
+    if (!SNAP || ended) { return Promise.resolve(); }
+    var payload = { action: action, revision: SNAP.session.revision };
+    if (target !== undefined && target !== null) { payload.target = target; }
+    if (params) { payload.params = params; }
 
-      timeline: [],
-      decisions: [],
-      observed: {},
-      incidents: {},
-      chains: [],                  // played chain records, for the debrief
-      vpnConnected: false,
-      networkDisconnected: false,
-      deletedHostile: 0
+    pendingRequests += 1;
+    renderBusy();
+    return request('/prototype/api/actions', { method: 'POST', body: payload })
+      .then(adopt)
+      .catch(function (error) {
+        if (error.status === 409 && !retried) {
+          return refresh().then(function () {
+            if (OBSERVATIONAL[action]) {
+              return send(action, target, params, true);
+            }
+            showTransient('The workstation moved on while that was on screen. '
+              + 'It is up to date now — check it and try again if you still '
+              + 'want to.');
+          });
+        }
+        if (error.status === 410) {
+          ended = true;
+          showTransient('This session has finished.');
+          return null;
+        }
+        if (error.status === 404 && error.code === 'no_session') {
+          showTransient('This training session is no longer open.');
+          return null;
+        }
+        // A network failure tells us nothing about whether the action was
+        // applied, so we do not guess. We re-read the authoritative state.
+        return refresh().catch(function () {
+          showTransient('The workstation could not reach the server. Nothing '
+            + 'has been assumed; try again in a moment.');
+        });
+      })
+      .then(function (value) {
+        pendingRequests -= 1;
+        renderBusy();
+        return value;
+      });
+  }
+
+  function renderBusy() {
+    var shell = qs('#pw-ws');
+    if (shell) { shell.setAttribute('data-busy', pendingRequests > 0 ? '1' : '0'); }
+  }
+
+  // =========================================================================
+  // Simulation clock
+  // =========================================================================
+  //
+  // The server owns simulation time. This interpolates between updates purely
+  // so the corner of the screen does not sit frozen, and resynchronises to the
+  // server on every snapshot. Nothing here is ever read back to the server and
+  // no simulation decision depends on it.
+
+  var clockAnchor = { simMs: 0, wallMs: 0, rate: 12 };
+
+  function syncClock() {
+    if (!SNAP) { return; }
+    clockAnchor = {
+      simMs: SNAP.session.sim_time_ms,
+      wallMs: Date.now(),
+      rate: SNAP.session.clock_rate || 12
     };
   }
 
-  // =========================================================================
-  // Simulated clock
-  // =========================================================================
-  //
-  // Starts at 09:00 and runs twelve times faster than the wall clock, so a
-  // twenty-minute review covers a plausible morning. The production clock is
-  // a server-owned SimClock; this is a display device and nothing more.
-
-  var CLOCK_START_MIN = 9 * 60;
-  var CLOCK_RATE = 12;
-
-  function simMinutes() {
-    if (!S) { return CLOCK_START_MIN; }
-    return CLOCK_START_MIN
-      + Math.floor(((Date.now() - S.startedAt) * CLOCK_RATE) / 60000);
-  }
-
   function nowLabel() {
-    var total = simMinutes();
+    if (!SNAP) { return '09:00'; }
+    if (ended || !SNAP.session.active) { return SNAP.session.clock; }
+    var simMs = clockAnchor.simMs + (Date.now() - clockAnchor.wallMs);
+    var total = 9 * 60 + Math.floor((simMs * clockAnchor.rate) / 60000);
     var hh = Math.floor(total / 60) % 24;
     var mm = total % 60;
     return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
   }
 
   // =========================================================================
-  // Recording
-  // =========================================================================
-
-  function record(kind, label, detail, cause) {
-    S.timeline.push({
-      at: nowLabel(),
-      minute: simMinutes(),
-      kind: kind,
-      label: label,
-      detail: detail || '',
-      cause: cause || null
-    });
-  }
-
-  /* An observational action. Marks a piece of evidence as actually inspected,
-   * which is the available-versus-observed distinction the Context Ledger
-   * formalises. Here it is a flat map; there it is a first-class object. */
-  function observe(actionKey, label) {
-    if (!S.observed[actionKey]) {
-      S.observed[actionKey] = { at: nowLabel(), minute: simMinutes() };
-      if (label) { record('investigation', label); }
-    }
-  }
-
-  function relevantEvidenceFor(messageId) {
-    var message = findMail(messageId);
-    if (!message || !message.analysis || !message.analysis.evidence) { return []; }
-    return message.analysis.evidence;
-  }
-
-  function evidenceState(items) {
-    return (items || []).map(function (item) {
-      return {
-        id: item.id,
-        label: item.label,
-        where: item.where,
-        observed: !!S.observed[item.action]
-      };
-    });
-  }
-
-  // =========================================================================
-  // Decisions and consequence chains
-  // =========================================================================
-
-  function decide(decisionId, context) {
-    var definition = WORLD.decisions[decisionId];
-    if (!definition) { return; }
-
-    var evidence = evidenceState(context && context.evidence);
-    var entry = {
-      id: decisionId,
-      label: definition.label,
-      klass: definition['class'],
-      family: definition.family,
-      dimensions: definition.dimensions || [],
-      at: nowLabel(),
-      minute: simMinutes(),
-      where: (context && context.where) || '',
-      evidence: evidence,
-      inspectedBefore: evidence.filter(function (e) { return e.observed; }).length,
-      evidenceTotal: evidence.length
-    };
-    S.decisions.push(entry);
-    record('decision', definition.label, entry.where);
-
-    if (definition.chain) {
-      playChain(definition.chain, decisionId);
-    }
-
-    // Practice confirms a good decision explicitly. Simulation gives the
-    // ordinary result of a good decision and says nothing. Assessment says
-    // nothing about anything.
-    if (S.flags.explicit_confirmation
-        && (entry.klass === 'safe' || entry.klass === 'recovery_good')) {
-      APP.confirmation = {
-        text: confirmationText(decisionId),
-        at: Date.now()
-      };
-      setTimeout(function () {
-        if (APP.confirmation && Date.now() - APP.confirmation.at > 11000) {
-          APP.confirmation = null;
-          render();
-        }
-      }, 12000);
-    }
-
-    render();
-  }
-
-  function confirmationText(decisionId) {
-    var texts = {
-      'd-phish-report': 'That was the right call. Reporting it means the same '
-        + 'batch can be stopped for everyone else who received it.',
-      'd-ransom-report': 'Good. The attachment stayed unopened and the sender '
-        + 'is now on record.',
-      'd-bec-report': 'Good. An account change that arrives by mail is exactly '
-        + 'the thing to stop and check.',
-      'd-phish-verify': 'That is the check that works — you asked on a channel '
-        + 'the message did not supply.',
-      'd-bec-verify': 'That is the check that works. The number came from your '
-        + 'own records, not from the request.',
-      'd-mfa-deny-hostile': 'Right call. An approval belongs to something you '
-        + 'started.',
-      'd-mfa-approve-legit': 'That one was yours — same workstation, same '
-        + 'location, seconds after you signed in.',
-      'd-ransom-isolate': 'Taking it off the network first is the part most '
-        + 'people skip.',
-      'd-task-headcount-done': 'Done — and it was a genuine request, which is '
-        + 'the other half of the job.'
-    };
-    return texts[decisionId] || 'That was a reasonable way to handle it.';
-  }
-
-  function scaleDelay(ms) {
-    var scale = S.flags.consequence_delay_scale || 1;
-    if (S.fast) { scale = scale * 0.12; }
-    return Math.max(400, Math.round(ms * scale));
-  }
-
-  function playChain(chainId, decisionId) {
-    var chain = WORLD.chains[chainId];
-    if (!chain) { return; }
-
-    var record_ = {
-      chainId: chainId,
-      decisionId: decisionId,
-      title: chain.title,
-      incidentId: chain.incident_id,
-      startedAt: nowLabel(),
-      steps: []
-    };
-    S.chains.push(record_);
-
-    chain.steps.forEach(function (step) {
-      var handle = setTimeout(function () {
-        if (S.ended) { return; }
-        step.effects.forEach(function (effect) {
-          applyEffect(effect, step, chain);
-        });
-        record_.steps.push({
-          id: step.id,
-          cause: step.cause,
-          summary: step.summary,
-          at: nowLabel()
-        });
-        record('consequence', step.summary,
-               chain.title, step.cause === 'decision'
-                 ? (WORLD.decisions[decisionId] || {}).label
-                 : summaryOf(chain, step.cause));
-        render();
-
-        if (step.id === chain.settles_after) {
-          onChainSettled(chainId, decisionId);
-        }
-      }, scaleDelay(step.delay_ms));
-      timers.push(handle);
-    });
-  }
-
-  function summaryOf(chain, stepId) {
-    for (var i = 0; i < chain.steps.length; i += 1) {
-      if (chain.steps[i].id === stepId) { return chain.steps[i].summary; }
-    }
-    return null;
-  }
-
-  function applyEffect(effect, step, chain) {
-    switch (effect.type) {
-    case 'notification':
-      pushNotification({
-        kind: effect.kind,
-        title: effect.title,
-        body: effect.body,
-        opens: effect.opens || null
-      });
-      break;
-
-    case 'mail':
-      deliverMail(effect.mail_id, effect.folder || null, true);
-      break;
-
-    case 'mail_rule':
-      S.mailRule = effect.text;
-      break;
-
-    case 'file_state':
-      setFileState(effect.file_id, effect.state, effect.note);
-      break;
-
-    case 'message':
-      appendMessage(effect.conversation_id, effect.from, effect.text);
-      break;
-
-    case 'mfa_prompt':
-      addPrompt(effect.prompt_id);
-      break;
-
-    case 'auth_activity':
-      S.authHistory.unshift({
-        id: 'auth-' + Math.random().toString(36).slice(2, 8),
-        app: effect.app, result: effect.result, device: effect.device,
-        location: effect.location, when: effect.when === 'just now'
-          ? nowLabel() : effect.when
-      });
-      break;
-
-    case 'task':
-      if (S.tasks[effect.task_id]) {
-        S.tasks[effect.task_id].state = effect.state;
-        S.tasks[effect.task_id].note = effect.text;
-      }
-      break;
-
-    case 'incident':
-      S.incidents[effect.incident_id] = {
-        id: effect.incident_id,
-        title: effect.title,
-        note: effect.note,
-        openedAt: nowLabel(),
-        contained: false
-      };
-      break;
-
-    default:
-      break;
-    }
-  }
-
-  /* When the last step of a chain lands, the world has settled. That is the
-   * moment the provisional comparison is allowed to interrupt — never in the
-   * middle of a chain, and never in an Assessment attempt. */
-  function onChainSettled(chainId, decisionId) {
-    if (chainId === 'chain-file-incident') {
-      // The root cause comes first: opening the attachment is what started
-      // this. Only after that is acknowledged does the *second* question --
-      // what you did once files began failing -- become the live one.
-      maybeShowComparison(decisionId, function () {
-        if (S.incidents['inc-files'] && !S.incidents['inc-files'].contained
-            && !alreadyDecided('d-ransom-continue')) {
-          decide('d-ransom-continue', { where: 'Files' });
-        }
-      });
-      return;
-    }
-
-    maybeShowComparison(decisionId);
-  }
-
-  /* ``after`` runs once the learner has moved on -- immediately when the
-   * comparison is suppressed (Assessment), or on Continue when it is shown.
-   * It must run either way, because what it does is record world state, not
-   * pedagogy. */
-  function maybeShowComparison(decisionId, after) {
-    function done() {
-      resumeDelivery();
-      if (after) { after(); }
-    }
-
-    if (!S.flags.safer_alternative) { done(); return; }
-    if (!window.RewindSecComparison) { done(); return; }
-
-    var authored = WORLD.safer_alternatives[decisionId];
-    if (!authored) { done(); return; }
-
-    var decision = null;
-    for (var i = S.decisions.length - 1; i >= 0; i -= 1) {
-      if (S.decisions[i].id === decisionId) { decision = S.decisions[i]; break; }
-    }
-
-    S.paused = true;
-    window.RewindSecComparison.show({
-      heading: authored.heading,
-      what_you_did: authored.what_you_did,
-      what_followed: authored.what_followed,
-      evidence: decision ? decision.evidence : [],
-      safer_process: authored.safer_process,
-      likely_outcome: authored.likely_outcome,
-      still_true: authored.still_true
-    }).then(function () {
-      S.paused = false;
-      render();
-      done();
-    });
-  }
-
-  // =========================================================================
-  // World mutation helpers
+  // Lookups over the snapshot
   // =========================================================================
 
   function findMail(id) {
-    for (var i = 0; i < S.mail.length; i += 1) {
-      if (S.mail[i].id === id) { return S.mail[i]; }
+    var list = SNAP.mail.messages;
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i].id === id) { return list[i]; }
     }
     return null;
   }
 
-  function deliverMail(id, folder, silent) {
-    var message = findMail(id);
-    if (!message || message.delivered) { return; }
-    message.delivered = true;
-    message.unread = true;
-    message.read = false;
-    message.received = nowLabel();
-    if (folder) { message.folder = folder; }
-
-    // A mailbox rule created earlier in a chain files Security Operations
-    // mail away before the learner sees it. The message is still findable —
-    // it just does not arrive where they are looking.
-    if (S.mailRule && message.surface.from_address === 'security@northbridge.example') {
-      message.folder = 'archive';
+  function findFile(fileId) {
+    var files = SNAP.files.files;
+    for (var i = 0; i < files.length; i += 1) {
+      if (files[i].id === fileId) {
+        return { file: files[i], location: findLocation(files[i].location) };
+      }
     }
-
-    record('event', 'Message received: ' + message.surface.subject,
-           'From ' + message.surface.from_name);
-
-    if (message.folder !== 'archive') {
-      pushNotification({
-        kind: 'mail',
-        title: message.surface.from_name,
-        body: message.surface.subject,
-        opens: { app: 'mail', mail_id: message.id }
-      });
-    }
-    if (!silent) { render(); }
+    return null;
   }
 
-  function setFileState(fileId, state, note) {
-    S.files.forEach(function (location) {
-      location.files.forEach(function (file) {
-        if (file.id === fileId) {
-          file.state = state;
-          file.note = note || '';
-          if (state === 'unavailable' && file.name.indexOf('.demo_locked') < 0) {
-            file.displayName = file.name + '.demo_locked';
-          }
-        }
-      });
+  function findLocation(locationId) {
+    var list = SNAP.files.locations;
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i].id === locationId) { return list[i]; }
+    }
+    return list[0] || { id: null, name: '' };
+  }
+
+  function filesIn(locationId) {
+    return SNAP.files.files.filter(function (file) {
+      return file.location === locationId;
     });
   }
 
-  function appendMessage(conversationId, from, text) {
-    for (var i = 0; i < S.conversations.length; i += 1) {
-      if (S.conversations[i].id === conversationId) {
-        S.conversations[i].messages.push({
-          from: from, when: nowLabel(), text: text
-        });
-        S.conversations[i].unread = true;
-        return;
-      }
+  function findConversation(id) {
+    for (var i = 0; i < SNAP.messages.length; i += 1) {
+      if (SNAP.messages[i].id === id) { return SNAP.messages[i]; }
     }
+    return null;
   }
 
-  function addPrompt(promptId) {
-    for (var i = 0; i < WORLD.mfa_prompts.length; i += 1) {
-      if (WORLD.mfa_prompts[i].id === promptId) {
-        var already = S.prompts.some(function (p) {
-          return p.id === promptId && p.status === 'pending';
-        });
-        if (already) { return; }
-        var prompt = clone(WORLD.mfa_prompts[i]);
-        prompt.status = 'pending';
-        prompt.arrivedAt = nowLabel();
-        prompt.uid = promptId + '-' + S.prompts.length;
-        S.prompts.unshift(prompt);
-        record('event', 'Approval requested: ' + prompt.surface.app,
-               prompt.surface.device + ' · ' + prompt.surface.location);
-        pushNotification({
-          kind: 'auth',
-          title: 'Approval requested',
-          body: prompt.surface.app + ' · ' + prompt.surface.location,
-          opens: { app: 'authenticator' }
-        });
-        return;
-      }
+  function findContact(id) {
+    for (var i = 0; i < SNAP.directory.length; i += 1) {
+      if (SNAP.directory[i].id === id) { return SNAP.directory[i]; }
     }
+    return null;
   }
 
-  var notifCounter = 0;
-
-  function pushNotification(spec) {
-    notifCounter += 1;
-    var entry = {
-      id: 'n-' + notifCounter,
-      kind: spec.kind || 'system',
-      title: spec.title,
-      body: spec.body,
-      when: nowLabel(),
-      opens: spec.opens || null,
-      unread: true
-    };
-    S.notifications.unshift(entry);
-    showToast(entry);
+  function incident(key) {
+    for (var i = 0; i < SNAP.incidents.length; i += 1) {
+      if (SNAP.incidents[i].key === key) { return SNAP.incidents[i]; }
+    }
+    return null;
   }
 
   // =========================================================================
-  // Event delivery cadence
-  // =========================================================================
-
-  var deliveryTimer = null;
-
-  function cadence() {
-    return WORLD.cadence[S.mode] || WORLD.cadence.simulation;
-  }
-
-  function nextDelay() {
-    var c = cadence();
-    if (S.fast) { return 2500; }
-    if (c.style === 'paced') { return 18000; }
-    var jitter = Math.round((Math.random() * 2 - 1) * (c.jitter_ms || 0));
-    return Math.max(4000, c.base_ms + jitter);
-  }
-
-  function scheduleNextDelivery(overrideMs) {
-    if (deliveryTimer) { clearTimeout(deliveryTimer); }
-    if (S.ended || S.queueIndex >= S.queue.length) { return; }
-    var delay = overrideMs !== undefined ? overrideMs : nextDelay();
-    deliveryTimer = setTimeout(function () {
-      if (S.ended) { return; }
-      if (S.paused) { scheduleNextDelivery(2500); return; }
-
-      // Practice waits for the learner. Simulation and Assessment do not:
-      // in Assessment, events are explicitly allowed to pile up.
-      if (cadence().style === 'paced' && S.awaitingResolution) {
-        var waited = Date.now() - S.awaitingResolution.since;
-        if (waited < (cadence().max_wait_ms || 90000)) {
-          scheduleNextDelivery(5000);
-          return;
-        }
-      }
-      deliverNext();
-    }, delay);
-    timers.push(deliveryTimer);
-  }
-
-  function resumeDelivery() { scheduleNextDelivery(); }
-
-  function deliverNext() {
-    if (S.queueIndex >= S.queue.length) { return; }
-    var entry = S.queue[S.queueIndex];
-    S.queueIndex += 1;
-
-    if (entry.type === 'mail') {
-      deliverMail(entry.ref, null, true);
-      S.awaitingResolution = { ref: entry.ref, since: Date.now() };
-    } else if (entry.type === 'mfa') {
-      addPrompt(entry.ref);
-      S.awaitingResolution = { ref: entry.ref, since: Date.now() };
-    }
-
-    render();
-    scheduleNextDelivery();
-  }
-
-  function markResolved(ref) {
-    if (S.awaitingResolution && S.awaitingResolution.ref === ref) {
-      S.awaitingResolution = null;
-      if (cadence().style === 'paced') { scheduleNextDelivery(7000); }
-    }
-  }
-
-  // =========================================================================
-  // Window management
+  // Window management  (presentation only)
   // =========================================================================
 
   var zCounter = 10;
@@ -693,18 +377,13 @@
       var n = Object.keys(WIN).length;
       var w = Math.min(spec.w, Math.max(320, size.w - 40));
       var h = Math.min(spec.h, Math.max(240, size.h - 40));
-      // The first window opens centred, slightly above the optical middle;
-      // each one after it steps down and right. Opening on the top-left
-      // corner leaves a large empty desk to its lower right and reads as a
-      // window that has not been placed so much as dropped.
       var step = 34;
-      var baseX = Math.round((size.w - w) / 2);
-      var baseY = Math.round((size.h - h) * 0.42);
+      var baseX = Math.max(16, Math.round((size.w - w) / 2) - step);
+      var baseY = Math.max(12, Math.round((size.h - h) / 2) - 26 - step);
       WIN[appId] = {
-        open: true, minimized: false, maximized: size.w < 1100,
-        x: clamp(baseX + (n % 5) * step, 12, Math.max(12, size.w - w - 12)),
-        y: clamp(baseY + (n % 5) * step, 12, Math.max(12, size.h - h - 12)),
-        w: w, h: h, z: (zCounter += 1)
+        x: clamp(baseX + n * step, 8, Math.max(8, size.w - w - 8)),
+        y: clamp(baseY + n * step, 8, Math.max(8, size.h - h - 8)),
+        w: w, h: h, z: (zCounter += 1), open: true, minimized: false
       };
     } else {
       WIN[appId].open = true;
@@ -713,39 +392,28 @@
     }
     if (focusTarget) { applyFocusTarget(appId, focusTarget); }
     render();
-    var node = qs('[data-window="' + appId + '"] .pw-winbody');
-    if (node) { node.setAttribute('tabindex', '-1'); node.focus(); }
   }
 
-  /* Keep every open window inside the work area. Purely geometric: no window
-   * is opened, closed, focused or re-ordered here. */
   function reflowWindows() {
     var size = areaSize();
     Object.keys(WIN).forEach(function (appId) {
       var win = WIN[appId];
-      if (!win || !win.open || win.maximized) { return; }
       win.w = Math.min(win.w, Math.max(320, size.w - 24));
-      win.h = Math.min(win.h, Math.max(220, size.h - 24));
-      win.x = clamp(win.x, 12, Math.max(12, size.w - win.w - 12));
-      win.y = clamp(win.y, 12, Math.max(12, size.h - win.h - 12));
+      win.h = Math.min(win.h, Math.max(240, size.h - 24));
+      win.x = clamp(win.x, 8, Math.max(8, size.w - win.w - 8));
+      win.y = clamp(win.y, 8, Math.max(8, size.h - win.h - 8));
     });
   }
 
   function applyFocusTarget(appId, target) {
     if (appId === 'mail' && target.mail_id) {
-      var message = findMail(target.mail_id);
-      if (message) {
-        APP.mail.folder = message.folder;
-        openMessage(target.mail_id, true);
-      }
+      openMessage(target.mail_id);
     } else if (appId === 'files' && target.location_id) {
       APP.files.location = target.location_id;
     } else if (appId === 'messages' && target.conversation_id) {
       APP.messages.conversation = target.conversation_id;
       APP.messages.mobileDetail = true;
-      markConversationRead(target.conversation_id);
-    } else if (appId === 'browser' && target.url) {
-      browserNavigate(target.url);
+      send('messages.open', target.conversation_id);
     }
   }
 
@@ -760,306 +428,191 @@
   }
 
   function focusApp(appId) {
-    if (WIN[appId]) { WIN[appId].z = (zCounter += 1); render(); }
+    if (WIN[appId]) { WIN[appId].z = (zCounter += 1); }
   }
 
   function topWindow() {
     var best = null;
     Object.keys(WIN).forEach(function (appId) {
-      var w = WIN[appId];
-      if (w.open && !w.minimized && (!best || w.z > WIN[best].z)) { best = appId; }
+      var win = WIN[appId];
+      if (!win.open || win.minimized) { return; }
+      if (!best || win.z > WIN[best].z) { best = appId; }
     });
     return best;
+  }
+
+  function captureFocus() {
+    var active = document.activeElement;
+    if (!active || !active.id) { return null; }
+    return {
+      id: active.id,
+      start: active.selectionStart === undefined ? null : active.selectionStart,
+      end: active.selectionEnd === undefined ? null : active.selectionEnd
+    };
+  }
+
+  function restoreFocus(saved) {
+    if (!saved) { return; }
+    var node = document.getElementById(saved.id);
+    if (!node) { return; }
+    node.focus();
+    if (saved.start !== null && node.setSelectionRange) {
+      try { node.setSelectionRange(saved.start, saved.end); }
+      catch (err) { /* not a text field any more */ }
+    }
   }
 
   // =========================================================================
   // Rendering
   // =========================================================================
 
-  var focusSnapshot = null;
-
-  function captureFocus() {
-    var active = document.activeElement;
-    if (!active || !active.id) { focusSnapshot = null; return; }
-    focusSnapshot = {
-      id: active.id,
-      start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
-      end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null
-    };
-  }
-
-  function restoreFocus() {
-    if (!focusSnapshot) { return; }
-    var node = document.getElementById(focusSnapshot.id);
-    if (!node) { focusSnapshot = null; return; }
-    node.focus();
-    if (focusSnapshot.start !== null && node.setSelectionRange) {
-      try { node.setSelectionRange(focusSnapshot.start, focusSnapshot.end); }
-      catch (err) { /* not a text input any more */ }
-    }
-    focusSnapshot = null;
-  }
-
   function render() {
-    if (!S) { return; }
-    captureFocus();
+    if (!SNAP) { return; }
+    var saved = captureFocus();
     renderTopBar();
     renderRail();
     renderDesk();
     renderWindows();
     renderNotifications();
-    restoreFocus();
-  }
-
-  function focusLabel(focusId) {
-    var found = null;
-    (WORLD.focus_options || []).forEach(function (option) {
-      if (option.id === focusId) { found = option.label; }
-    });
-    return found || (String(focusId).charAt(0).toUpperCase()
-                     + String(focusId).slice(1));
+    renderComparison();
+    restoreFocus(saved);
   }
 
   function renderTopBar() {
+    if (!SNAP) { return; }
     qs('#pw-clock').textContent = nowLabel();
-    qs('#pw-mode-label').textContent = modeLabel(S.mode);
-    // The authored label, not a title-cased id: capitalising the first letter
-    // of "bec" and "mfa" turns two acronyms into "Bec" and "Mfa".
-    qs('#pw-focus-chip').textContent = focusLabel(S.focus) + ' focus';
-    qs('#pw-assessment-chip').hidden = !S.assessmentId;
+    qs('#pw-mode-label').textContent = MODE_LABELS[SNAP.session.mode]
+      || SNAP.session.mode;
+    qs('#pw-focus-chip').textContent = FOCUS_LABELS[SNAP.session.focus]
+      || SNAP.session.focus;
+    qs('#pw-assessment-chip').hidden = SNAP.session.mode !== 'assessment';
 
-    var unread = S.notifications.filter(function (n) { return n.unread; }).length;
+    var unread = SNAP.notifications.filter(function (n) { return n.unread; }).length;
     var badge = qs('#pw-notif-badge');
     badge.hidden = unread === 0;
-    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.textContent = unread;
   }
 
   function renderRail() {
-    var counts = {
-      mail: S.mail.filter(function (m) {
-        return m.delivered && m.unread && m.folder === 'inbox';
-      }).length,
-      messages: S.conversations.filter(function (c) { return c.unread; }).length,
-      authenticator: S.prompts.filter(function (p) { return p.status === 'pending'; }).length,
-      files: Object.keys(S.incidents).indexOf('inc-files') >= 0
-        ? S.files.reduce(function (total, location) {
-            return total + location.files.filter(function (f) {
-              return f.state === 'unavailable';
-            }).length;
-          }, 0)
-        : 0
-    };
+    var unreadMail = SNAP.mail.messages.filter(function (m) {
+      return m.unread && m.folder === 'inbox';
+    }).length;
+    var brokenFiles = SNAP.files.files.filter(function (f) {
+      return f.state === 'unavailable';
+    }).length;
+    var unreadChats = SNAP.messages.filter(function (c) { return c.unread; }).length;
+    var pendingAuth = SNAP.authenticator.requests.length;
 
-    var top = topWindow();
+    var counts = { mail: unreadMail, files: brokenFiles,
+                   messages: unreadChats, authenticator: pendingAuth };
+    qsa('[data-count]').forEach(function (node) {
+      var value = counts[node.getAttribute('data-count')] || 0;
+      node.hidden = value === 0;
+      node.textContent = value;
+    });
     qsa('.pw-applink').forEach(function (node) {
       var appId = node.getAttribute('data-app');
-      var win = WIN[appId];
-      node.classList.toggle('is-open', !!(win && win.open));
-      node.classList.toggle('is-active', appId === top);
-      node.setAttribute('aria-pressed', appId === top ? 'true' : 'false');
-
-      var badge = node.querySelector('[data-count]');
-      if (badge) {
-        var value = counts[appId] || 0;
-        badge.hidden = value === 0;
-        badge.textContent = String(value);
-      }
+      node.classList.toggle('is-open', !!(WIN[appId] && WIN[appId].open));
     });
   }
 
   function renderDesk() {
-    var anyOpen = Object.keys(WIN).some(function (id) {
-      return WIN[id].open && !WIN[id].minimized;
-    });
-    qs('#pw-desk').style.opacity = anyOpen ? '0' : '1';
-
-    var outstanding = Object.keys(S.tasks).map(function (id) {
-      return S.tasks[id];
-    }).filter(function (task) {
+    var outstanding = SNAP.tasks.filter(function (task) {
       return task.state === 'outstanding' || task.state === 'interrupted';
     });
-
-    var box = qs('#pw-desk-tasks');
-    box.hidden = outstanding.length === 0;
+    qs('#pw-desk-tasks').hidden = outstanding.length === 0;
     qs('#pw-desk-tasklist').innerHTML = outstanding.map(function (task) {
-      return '<li>' + esc(task.note || task.label) + '</li>';
+      return '<li>' + esc(task.label)
+        + (task.note ? ' <span class="pw-muted">· ' + esc(task.note) + '</span>' : '')
+        + '</li>';
     }).join('');
   }
 
-  function renderWindows() {
-    var area = qs('#pw-workarea');
-    var top = topWindow();
+  function windowSubtitle(appId) {
+    if (appId === 'mail') { return SNAP.learner.email; }
+    if (appId === 'files') { return SNAP.organization.workstation_id; }
+    if (appId === 'browser') {
+      return SNAP.session.network_disconnected ? 'offline' : '';
+    }
+    return '';
+  }
 
+  function renderWindows() {
+    var host = qs('#pw-workarea');
     Object.keys(APPS).forEach(function (appId) {
       var win = WIN[appId];
-      var node = qs('[data-window="' + appId + '"]', area);
-
+      var node = qs('#pw-win-' + appId);
       if (!win || !win.open || win.minimized) {
         if (node) { dismissWindow(node, appId, win && win.minimized); }
         return;
       }
-
       if (!node) {
         node = document.createElement('section');
         node.className = 'pw-window';
-        node.setAttribute('data-window', appId);
-        node.setAttribute('role', 'region');
+        node.id = 'pw-win-' + appId;
+        node.setAttribute('role', 'dialog');
         node.setAttribute('aria-label', APPS[appId].label);
-        // Notes is the one learner application where the clipboard works.
-        // Marking the whole window rather than each field means the exception
-        // cannot drift out of step with what Notes renders -- see
-        // static/prototype/integrity.js.
+        // Notes is the one learner application where copy, cut and paste work
+        // normally. A learner who needs to keep something has somewhere to
+        // keep it, which is what makes the restriction everywhere else
+        // reasonable rather than merely obstructive. The marker goes on the
+        // window itself so integrity.js can decide from the event target.
         if (appId === 'notes') { node.setAttribute('data-clipboard', 'allow'); }
-        node.innerHTML = windowChrome(appId);
-        area.insertBefore(node, qs('#pw-notifpanel', area));
+        host.insertBefore(node, qs('#pw-notifpanel'));
         bindWindow(node, appId);
+        if (!prefersReducedMotion()) { node.classList.add('is-entering'); }
       }
+      node.style.left = win.x + 'px';
+      node.style.top = win.y + 'px';
+      node.style.width = win.w + 'px';
+      node.style.height = win.h + 'px';
+      node.style.zIndex = win.z;
 
-      node.style.zIndex = String(win.z);
-
-      // Coming to the front is the one state change a window makes that a
-      // learner needs to *see*, because it is how they know which
-      // application their next keystroke goes to. It gets one short lift.
-      // Only on a genuine change of focus -- `render` runs on every
-      // background tick, and a window that was already at the front must
-      // stay still.
-      var isTop = (appId === top);
-      if (isTop && !node.classList.contains('is-focused')) { raiseWindow(node); }
-      node.classList.toggle('is-focused', isTop);
-      node.classList.toggle('is-maximized', win.maximized);
-      node.classList.toggle('is-draggable', canDrag() && !win.maximized);
-      if (!win.maximized) {
-        node.style.left = win.x + 'px';
-        node.style.top = win.y + 'px';
-        node.style.width = win.w + 'px';
-        node.style.height = win.h + 'px';
-      } else {
-        node.style.left = node.style.top = node.style.width = node.style.height = '';
-      }
-
-      var sub = qs('.pw-winbar-sub', node);
-      if (sub) { sub.textContent = windowSubtitle(appId); }
-
-      // A background event must never wipe what the learner is typing into a
-      // password field. The value of that field is deliberately not held in
-      // state -- it is never read and never stored -- so the only way to keep
-      // it intact across an unrelated re-render is to leave the window alone
-      // while it has focus.
-      var body = qs('.pw-winbody', node);
-      if (holdsFocusedPassword(body)) { return; }
-
-      // Compare before writing. A background consequence tick re-renders
-      // every open window several times a session; without this the whole
-      // body is rebuilt each time, which throws away scroll position and
-      // restarts every CSS entrance animation inside it. With it, the
-      // animations in workstation.css fire when a learner actually selects
-      // something and stay still otherwise.
-      var markup = renderApp(appId);
-      if (body.innerHTML !== markup) { body.innerHTML = markup; }
+      var subtitle = windowSubtitle(appId);
+      node.innerHTML = ''
+        + '<header class="pw-winbar" data-drag="' + appId + '">'
+        + '  <span class="pw-winbar-title">' + icon(APPS[appId].icon)
+        + '    <b>' + esc(APPS[appId].label) + '</b>'
+        + (subtitle ? '<span class="pw-winbar-sub">' + esc(subtitle) + '</span>' : '')
+        + '  </span>'
+        + '  <span class="pw-winbar-ctl">'
+        + '    <button type="button" class="pw-winctl" data-win-min="' + appId
+        + '" aria-label="Minimise">' + icon('minus') + '</button>'
+        + '    <button type="button" class="pw-winctl" data-win-close="' + appId
+        + '" aria-label="Close">' + icon('close') + '</button>'
+        + '  </span>'
+        + '</header>'
+        + '<div class="pw-winbody">' + renderApp(appId) + '</div>';
     });
   }
 
-  // A window leaving the desk plays its exit animation and is removed after
-  // it. The node stops answering to `data-window` immediately, so a window
-  // reopened during those few frames builds a fresh one rather than
-  // resurrecting the one on its way out.
-  //
-  // Focus is moved out first, to the rail button for the same application:
-  // that is where a keyboard user would expect to land after closing a
-  // window, and it means no animating, about-to-be-removed subtree ever
-  // holds the caret.
   function dismissWindow(node, appId, minimising) {
-    if (!node.parentNode) { return; }
-    node.removeAttribute('data-window');
-
-    if (node.contains(document.activeElement)) {
-      var railButton = qs('.pw-applink[data-app="' + appId + '"]');
-      if (railButton) { railButton.focus(); }
-      else if (document.activeElement.blur) { document.activeElement.blur(); }
-    }
-
+    if (node.classList.contains('is-leaving')) { return; }
     if (prefersReducedMotion()) {
       node.parentNode.removeChild(node);
       return;
     }
-
-    node.classList.add(minimising ? 'is-minimising' : 'is-closing');
-    var handle = setTimeout(function () {
+    node.classList.add('is-leaving');
+    if (minimising) { node.classList.add('is-minimising'); }
+    window.setTimeout(function () {
       if (node.parentNode) { node.parentNode.removeChild(node); }
-    }, 220);
-    timers.push(handle);
-  }
-
-  // The lift a window plays on being brought forward. The class is stripped
-  // again once the animation has run, so the next focus change can replay
-  // it; under reduced motion it is never added at all, and the window simply
-  // changes its rim and elevation like every other state in the product.
-  function raiseWindow(node) {
-    if (prefersReducedMotion()) { return; }
-    node.classList.remove('is-raising');
-    // Reading a layout property between the removal and the addition is what
-    // forces the animation to start over rather than being treated as the
-    // same, still-running one.
-    void node.offsetWidth;
-    node.classList.add('is-raising');
-    var handle = setTimeout(function () {
-      node.classList.remove('is-raising');
-    }, 320);
-    timers.push(handle);
+    }, 180);
   }
 
   function prefersReducedMotion() {
-    return !!(window.matchMedia
-              && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  }
-
-  function holdsFocusedPassword(node) {
-    var active = document.activeElement;
-    return !!(active && active.type === 'password' && node.contains(active));
-  }
-
-  function windowChrome(appId) {
-    var spec = APPS[appId];
-    return ''
-      + '<header class="pw-winbar">'
-      + '  <span class="pw-winbar-title">' + icon(spec.icon)
-      + '    <span>' + esc(spec.label) + '</span>'
-      + '    <span class="pw-winbar-sub"></span>'
-      + '  </span>'
-      + '  <span class="pw-winbar-actions">'
-      + '    <button type="button" class="pw-winctl" data-win="minimise"'
-      + '      aria-label="Minimise ' + esc(spec.label) + '">' + icon('minimise') + '</button>'
-      + '    <button type="button" class="pw-winctl" data-win="maximise"'
-      + '      aria-label="Maximise or restore ' + esc(spec.label) + '">' + icon('expand') + '</button>'
-      + '    <button type="button" class="pw-winctl is-close" data-win="close"'
-      + '      aria-label="Close ' + esc(spec.label) + '">' + icon('close') + '</button>'
-      + '  </span>'
-      + '</header>'
-      + '<div class="pw-winbody"></div>';
-  }
-
-  function windowSubtitle(appId) {
-    if (appId === 'mail') { return WORLD.learner.email; }
-    if (appId === 'files') { return WORLD.organization.workstation_id; }
-    if (appId === 'browser') {
-      var tab = APP.browser.tabs[APP.browser.active];
-      return tab ? tab.url : '';
-    }
-    if (appId === 'authenticator') { return WORLD.learner.name; }
-    return '';
+    return window.matchMedia
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 
   function renderApp(appId) {
-    switch (appId) {
-    case 'mail': return renderMail();
-    case 'browser': return renderBrowser();
-    case 'files': return renderFiles();
-    case 'messages': return renderMessages();
-    case 'authenticator': return renderAuthenticator();
-    case 'directory': return renderDirectory();
-    case 'notes': return renderNotes();
-    default: return '';
-    }
+    if (appId === 'mail') { return renderMail(); }
+    if (appId === 'browser') { return renderBrowser(); }
+    if (appId === 'files') { return renderFiles(); }
+    if (appId === 'messages') { return renderMessages(); }
+    if (appId === 'authenticator') { return renderAuthenticator(); }
+    if (appId === 'directory') { return renderDirectory(); }
+    if (appId === 'notes') { return renderNotes(); }
+    return '';
   }
 
   // =========================================================================
@@ -1069,13 +622,10 @@
   function visibleMail() {
     var state = APP.mail;
     var term = state.search.trim().toLowerCase();
-    return S.mail.filter(function (message) {
-      if (!message.delivered) { return false; }
+    return SNAP.mail.messages.filter(function (message) {
       if (term) {
-        var haystack = [
-          message.surface.subject, message.surface.from_name,
-          message.surface.from_address, (message.surface.body || []).join(' ')
-        ].join(' ').toLowerCase();
+        var haystack = [message.subject, message.from_name,
+                        (message.body || []).join(' ')].join(' ').toLowerCase();
         return haystack.indexOf(term) >= 0;
       }
       return message.folder === state.folder;
@@ -1086,14 +636,13 @@
     var state = APP.mail;
     var messages = visibleMail();
     var selected = state.selected ? findMail(state.selected) : null;
-    if (selected && !selected.delivered) { selected = null; }
 
     var folders = FOLDERS.map(function (folder) {
-      var count = S.mail.filter(function (m) {
-        return m.delivered && m.folder === folder.id && m.unread;
+      var count = SNAP.mail.messages.filter(function (m) {
+        return m.folder === folder.id && m.unread;
       }).length;
-      var total = S.mail.filter(function (m) {
-        return m.delivered && m.folder === folder.id;
+      var total = SNAP.mail.messages.filter(function (m) {
+        return m.folder === folder.id;
       }).length;
       return '<button type="button" class="pw-navitem'
         + (state.folder === folder.id && !state.search ? ' is-active' : '') + '"'
@@ -1104,24 +653,24 @@
     }).join('');
 
     var rows = messages.map(function (message) {
-      var preview = (message.surface.body || [''])[0] || '';
+      var preview = (message.body || [''])[0] || '';
       return '<button type="button" class="pw-msgrow'
         + (message.unread ? ' is-unread' : '')
         + (state.selected === message.id ? ' is-active' : '') + '"'
-        + ' data-mail-open="' + message.id + '">'
+        + ' data-mail-open="' + esc(message.id) + '">'
         + '<span class="pw-msgrow-top">'
-        + '<span class="pw-msgrow-from">' + esc(message.surface.from_name) + '</span>'
+        + '<span class="pw-msgrow-from">' + esc(message.from_name) + '</span>'
         + '<span class="pw-msgrow-time">' + esc(message.received) + '</span>'
         + '</span>'
-        + '<span class="pw-msgrow-subject">' + esc(message.surface.subject) + '</span>'
+        + '<span class="pw-msgrow-subject">' + esc(message.subject) + '</span>'
         + '<span class="pw-msgrow-preview">' + esc(preview.slice(0, 92)) + '</span>'
-        + (message.reported || message.repliedAt || (message.surface.attachments || []).length
+        + (message.reported || message.replied || (message.attachments || []).length
             ? '<span class="pw-msgrow-flags">'
-              + ((message.surface.attachments || []).length
+              + ((message.attachments || []).length
                   ? '<span class="pw-chip">' + icon('paperclip', 'style="width:11px;height:11px"')
                     + ' attachment</span>' : '')
               + (message.reported ? '<span class="pw-chip is-caution">reported</span>' : '')
-              + (message.repliedAt ? '<span class="pw-chip">replied</span>' : '')
+              + (message.replied ? '<span class="pw-chip">replied</span>' : '')
               + '</span>'
             : '')
         + '</button>';
@@ -1145,9 +694,9 @@
       + '          aria-label="Search mail" value="' + esc(state.search) + '">'
       + '      </label>'
       + '    </div>'
-      + (S.mailRule
+      + (SNAP.mail.rule
           ? '<div class="pw-mailbanner">' + icon('info')
-            + '<span>' + esc(S.mailRule) + '</span></div>'
+            + '<span>' + esc(SNAP.mail.rule) + '</span></div>'
           : '')
       + '    <div class="pw-pane-scroll">' + rows + '</div>'
       + '  </div>'
@@ -1159,110 +708,136 @@
       + '</div>';
   }
 
+  /* The reader shows what a mail client shows: sender name, sender address,
+   * subject, body, the visible text of each link, and each attachment's name
+   * and size.
+   *
+   * The full header, a link's real destination, and an attachment's type and
+   * provenance are *inspection-only*. They are not in the snapshot at all
+   * until the learner asks for them, so this cannot render them early even by
+   * mistake — pressing the button posts an observational action and the value
+   * arrives with the next snapshot. That is the available-versus-observed
+   * distinction, made real rather than decorative. */
   function renderReader(message) {
     var state = APP.mail;
-    var surface = message.surface;
-    var confirmation = APP.confirmation
+    var confirmation = NOTICE
       ? '<div class="pw-confirmstrip">' + icon('check')
-        + '<span>' + esc(APP.confirmation.text) + '</span></div>'
+        + '<span>' + esc(NOTICE.text) + '</span></div>'
       : '';
 
-    var headers = state.headers
+    var headers = (state.headers && message.headers)
       ? '<div class="pw-reader-headers"><dl>'
-        + '<dt>From</dt><dd>' + esc(surface.from_address) + '</dd>'
+        + '<dt>From</dt><dd>' + esc(message.headers.from_address) + '</dd>'
         + '<dt>Reply-To</dt><dd>'
-        + esc(surface.reply_to || surface.from_address) + '</dd>'
-        + '<dt>To</dt><dd>' + esc(surface.to) + '</dd>'
-        + (surface.cc ? '<dt>Cc</dt><dd>' + esc(surface.cc) + '</dd>' : '')
+        + esc(message.headers.reply_to || message.headers.from_address) + '</dd>'
+        + '<dt>To</dt><dd>' + esc(message.headers.to) + '</dd>'
+        + (message.headers.cc
+            ? '<dt>Cc</dt><dd>' + esc(message.headers.cc) + '</dd>' : '')
         + '<dt>Received</dt><dd>' + esc(message.received) + '</dd>'
         + '</dl></div>'
       : '';
 
-    var body = (surface.body || []).map(function (paragraph) {
-      if (paragraph.indexOf('———') === 0) {
+    var body = (message.body || []).map(function (paragraph) {
+      if (String(paragraph).indexOf('———') === 0) {
         return '<p class="pw-reader-quote">' + esc(paragraph) + '</p>';
       }
       return '<p>' + esc(paragraph) + '</p>';
     }).join('');
 
-    var links = (surface.links || []).map(function (link, index) {
-      var shown = state.linkShown === message.id + ':' + index;
+    var links = (message.links || []).map(function (link) {
+      var key = message.id + ':' + link.index;
+      var shown = state.linkShown === key && link.href;
       return '<p><button type="button" class="pw-maillink"'
-        + ' data-mail-link="' + esc(link.href) + '">' + esc(link.text)
+        + ' data-mail-link="' + esc(key) + '">' + esc(link.text)
         + icon('external', 'style="width:12px;height:12px"') + '</button>'
         + ' <button type="button" class="pw-linkbtn" style="margin-left:.5rem"'
-        + ' data-mail-inspect-link="' + message.id + ':' + index + '">'
+        + ' data-mail-inspect-link="' + esc(key) + '">'
         + (shown ? 'Hide destination' : 'Where does this go?') + '</button>'
         + (shown ? '<span class="pw-linkinfo">' + esc(link.href) + '</span>' : '')
         + '</p>';
     }).join('');
 
-    var attachments = (surface.attachments || []).map(function (attachment, index) {
-      var key = message.id + ':' + index;
-      var shown = state.linkShown === 'att:' + key;
-      return '<div class="pw-attach">' + icon(attachmentIcon(attachment.kind))
+    var attachments = (message.attachments || []).map(function (attachment) {
+      var key = message.id + ':' + attachment.index;
+      var shown = state.linkShown === 'att:' + key && attachment.detail;
+      return '<div class="pw-attach">' + icon(attachmentIcon(attachment.name))
         + '<span class="pw-attach-main"><b>' + esc(attachment.name) + '</b>'
         + '<span>' + esc(attachment.size) + '</span>'
         + (shown
-            ? '<span class="pw-linkinfo">Type: ' + esc(attachmentKindLabel(attachment.kind))
-              + '<br>Sender: ' + esc(surface.from_address) + '</span>'
+            ? '<span class="pw-linkinfo">Type: ' + esc(attachment.detail.kind_label)
+              + '<br>Sender: ' + esc(attachment.detail.sender) + '</span>'
             : '')
         + '</span>'
         + '<span class="pw-attach-actions">'
-        + '<button type="button" class="pw-btn is-sm" data-att-inspect="' + key + '">'
+        + '<button type="button" class="pw-btn is-sm" data-att-inspect="' + esc(key) + '">'
         + (shown ? 'Hide details' : 'Details') + '</button>'
-        + '<button type="button" class="pw-btn is-sm" data-att-download="' + key + '">'
+        + '<button type="button" class="pw-btn is-sm" data-att-download="' + esc(key) + '">'
         + 'Download</button>'
         + '</span></div>';
     }).join('');
 
     var compose = state.composing === message.id
       ? '<div class="pw-compose">'
-        + '<h4>Reply to ' + esc(surface.from_name) + '</h4>'
+        + '<h4>Reply to ' + esc(message.from_name) + '</h4>'
         + '<textarea id="pw-compose-body" aria-label="Reply text">'
         + esc(state.draft) + '</textarea>'
         + '<div class="pw-compose-actions">'
         + '<button type="button" class="pw-btn is-primary is-sm" data-mail-send="'
-        + message.id + '">Send</button>'
+        + esc(message.id) + '">Send</button>'
         + '<button type="button" class="pw-btn is-sm" data-mail-cancel="1">Cancel</button>'
         + '</div></div>'
       : '';
 
-    var hint = S.flags.investigation_hints
+    var hint = flags().investigation_hints
       ? '<div class="pw-note" style="margin:.75rem 0;font-size:.8rem">'
         + 'You can open the full header, check where a link actually goes, '
         + 'search older mail from the same sender, or look someone up in the '
         + 'Directory before you act.</div>'
       : '';
 
+    if (message.own) {
+      return '<div class="pw-pane-head">'
+        + '<button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-mail-back="1">'
+        + icon('back') + ' Inbox</button>'
+        + '<h3>' + esc(message.subject) + '</h3></div>'
+        + '<div class="pw-pane-scroll"><div class="pw-reader">'
+        + '<h2 class="pw-reader-subject">' + esc(message.subject) + '</h2>'
+        + '<div class="pw-reader-from"><span class="pw-avatar is-neutral" aria-hidden="true">'
+        + esc(initialsOf(message.from_name)) + '</span>'
+        + '<span class="pw-reader-from-main"><b>To ' + esc(message.to) + '</b>'
+        + '<span>' + esc(message.received) + '</span></span></div>'
+        + '<div class="pw-reader-body">' + body + '</div>'
+        + '</div></div>';
+    }
+
     return ''
       + '<div class="pw-pane-head">'
       + '  <button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-mail-back="1">'
       + icon('back') + ' Inbox</button>'
       // Reply is the ordinary thing to do with a message, so it carries the
-      // toolbar's one emphasis. Nothing else in the row is ranked: Report
-      // must never look more or less encouraged than Forward or Delete.
-      + '  <button type="button" class="pw-btn is-sm is-primary" data-mail-reply="' + message.id + '">'
+      // toolbar's one emphasis. Nothing else in the row is ranked: Report must
+      // never look more or less encouraged than Forward or Delete.
+      + '  <button type="button" class="pw-btn is-sm is-primary" data-mail-reply="' + esc(message.id) + '">'
       + icon('reply', 'style="width:13px;height:13px"') + ' Reply</button>'
-      + '  <button type="button" class="pw-btn is-sm" data-mail-forward="' + message.id + '">Forward</button>'
-      + '  <button type="button" class="pw-btn is-sm" data-mail-report="' + message.id + '">'
+      + '  <button type="button" class="pw-btn is-sm" data-mail-forward="' + esc(message.id) + '">Forward</button>'
+      + '  <button type="button" class="pw-btn is-sm" data-mail-report="' + esc(message.id) + '">'
       + icon('flag', 'style="width:13px;height:13px"') + ' Report</button>'
-      + '  <button type="button" class="pw-btn is-sm" data-mail-delete="' + message.id + '">'
+      + '  <button type="button" class="pw-btn is-sm" data-mail-delete="' + esc(message.id) + '">'
       + icon('trash', 'style="width:13px;height:13px"') + ' Delete</button>'
       + '  <span class="pw-spacer"></span>'
       + '  <button type="button" class="pw-btn is-sm" data-mail-headers="'
-      + message.id + '" aria-pressed="' + (APP.mail.headers ? 'true' : 'false') + '">'
-      + (APP.mail.headers ? 'Hide header' : 'Show header') + '</button>'
+      + esc(message.id) + '" aria-pressed="' + (state.headers ? 'true' : 'false') + '">'
+      + (state.headers ? 'Hide header' : 'Show header') + '</button>'
       + '</div>'
       + confirmation
       + '<div class="pw-pane-scroll"><div class="pw-reader">'
-      + '  <h2 class="pw-reader-subject">' + esc(surface.subject) + '</h2>'
+      + '  <h2 class="pw-reader-subject">' + esc(message.subject) + '</h2>'
       + '  <div class="pw-reader-from">'
       + '    <span class="pw-avatar is-neutral" aria-hidden="true">'
-      + esc(initialsOf(surface.from_name)) + '</span>'
+      + esc(initialsOf(message.from_name)) + '</span>'
       + '    <span class="pw-reader-from-main">'
-      + '      <b>' + esc(surface.from_name) + '</b>'
-      + '      <span>' + esc(surface.from_address) + '</span>'
+      + '      <b>' + esc(message.from_name) + '</b>'
+      + '      <span>' + esc(message.from_address) + '</span>'
       + '    </span>'
       + '  </div>'
       + headers
@@ -1273,19 +848,11 @@
       + compose;
   }
 
-  function attachmentIcon(kind) {
-    if (kind === 'pdf') { return 'pdf'; }
-    if (kind === 'spreadsheet' || kind === 'spreadsheet-macro') { return 'sheet'; }
+  function attachmentIcon(name) {
+    var lower = String(name || '').toLowerCase();
+    if (lower.indexOf('.pdf') >= 0) { return 'pdf'; }
+    if (lower.indexOf('.xls') >= 0 || lower.indexOf('.csv') >= 0) { return 'sheet'; }
     return 'doc';
-  }
-
-  function attachmentKindLabel(kind) {
-    if (kind === 'spreadsheet-macro') {
-      return 'Spreadsheet containing macros (.xlsm)';
-    }
-    if (kind === 'spreadsheet') { return 'Spreadsheet (.xlsx)'; }
-    if (kind === 'pdf') { return 'Portable document (.pdf)'; }
-    return 'Document';
   }
 
   function initialsOf(name) {
@@ -1294,44 +861,36 @@
   }
 
   function defaultReply(message) {
-    if (message.id === 'm-headcount') {
+    if (message && message.id === 'm-headcount') {
       return 'Hi Marcus,\n\nConfirmed contractor headcount for Q3 is 41.\n\nAarti';
     }
     return '';
   }
 
-  function openMessage(messageId, silent) {
-    var message = findMail(messageId);
-    if (!message) { return; }
+  function openMessage(messageId) {
     APP.mail.selected = messageId;
     APP.mail.headers = false;
     APP.mail.linkShown = null;
     APP.mail.composing = null;
     APP.mail.mobileDetail = true;
-    if (message.unread) {
-      message.unread = false;
-      message.read = true;
-      record('action', 'Opened: ' + message.surface.subject,
-             'From ' + message.surface.from_name);
-    }
-    observe('open_mail:' + messageId);
-    markResolved(messageId);
-    if (!silent) { render(); }
+    render();
+    send('mail.open', messageId);
   }
 
   // =========================================================================
   // Browser
   // =========================================================================
+  //
+  // Tabs and history are presentation and live here. Which addresses have
+  // actually been reached, and what each page shows, are server state: the
+  // snapshot carries only pages this session has genuinely visited, and an
+  // address that is not one of the synthetic pages simply has no content.
+  // Nothing in this file fetches anything from an address.
 
   function ensureTab() {
     if (!APP.browser.tabs.length) {
       APP.browser.tabs.push({
-        url: WORLD.browser.home,
-        history: [WORLD.browser.home],
-        index: 0,
-        signedIn: {},
-        pending: null,
-        accountOverride: null,
+        url: SNAP.browser.home, history: [SNAP.browser.home], index: 0,
         urlDraft: null
       });
       APP.browser.active = 0;
@@ -1341,9 +900,7 @@
 
   function normaliseUrl(raw) {
     return String(raw || '').trim()
-      .replace(/^https?:\/\//i, '')
-      .replace(/\/+$/, '')
-      .toLowerCase();
+      .replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
   }
 
   function browserNavigate(rawUrl) {
@@ -1354,17 +911,20 @@
     tab.index = tab.history.length - 1;
     tab.url = url;
     tab.urlDraft = null;
-    observe('browser_visit:' + url);
-    record('action', 'Opened ' + url, 'Browser');
     openApp('browser');
+    send('browser.navigate', null, { url: url });
+  }
+
+  function pageFor(url) {
+    return (SNAP.browser.pages || {})[url] || null;
   }
 
   function renderBrowser() {
     var tab = ensureTab();
-    var page = WORLD.browser.pages[tab.url];
+    var page = pageFor(tab.url);
 
     var tabs = APP.browser.tabs.map(function (entry, index) {
-      var titled = WORLD.browser.pages[entry.url];
+      var titled = pageFor(entry.url);
       return '<button type="button" class="pw-tab'
         + (index === APP.browser.active ? ' is-active' : '') + '"'
         + ' data-tab-select="' + index + '">'
@@ -1375,7 +935,7 @@
         + '</button>';
     }).join('');
 
-    var bookmarks = WORLD.browser.bookmarks.map(function (bookmark) {
+    var bookmarks = SNAP.browser.bookmarks.map(function (bookmark) {
       return '<button type="button" class="pw-bookmark" data-go="'
         + esc(bookmark.url) + '">' + esc(bookmark.label) + '</button>';
     }).join('')
@@ -1412,10 +972,9 @@
     if (!page) {
       return '<div class="pw-blocked">' + icon('globe', 'style="width:28px;height:28px"')
         + '<h1>This address is not reachable</h1>'
-        + '<p>This browser only reaches the synthetic ' + esc(WORLD.organization.name)
-        + ' network used by the prototype. Nothing outside it can be loaded.</p></div>';
+        + '<p>This browser only reaches the synthetic ' + esc(SNAP.organization.name)
+        + ' network. Nothing outside it can be loaded.</p></div>';
     }
-
     if (page.kind === 'signin') { return renderSignin(tab, page); }
     if (page.kind === 'filelist') { return renderBrowserFiles(page); }
     if (page.kind === 'payments') { return renderPayments(tab, page); }
@@ -1433,8 +992,12 @@
       + sections + '</div>';
   }
 
+  /* The sign-in form never reads the password field, never serialises it and
+   * never sends it. Submitting posts the *address* and nothing else; the
+   * server decides what signing in on that address means. The field is
+   * cleared on submit so the typed value does not even survive in the DOM. */
   function renderSignin(tab, page) {
-    var signedIn = tab.signedIn[tab.url];
+    var signedIn = page.signed_in;
 
     if (signedIn === 'pending') {
       return '<div class="pw-signin"><h1>' + esc(page.heading) + '</h1>'
@@ -1446,7 +1009,7 @@
     if (signedIn === 'done') {
       return '<div class="pw-site"><div class="pw-site-head">'
         + '<h1>' + esc(page.heading) + '</h1>'
-        + '<p>Signed in as ' + esc(WORLD.learner.email) + '</p></div>'
+        + '<p>Signed in as ' + esc(SNAP.learner.email) + '</p></div>'
         + '<section class="pw-site-section"><h2>Your record</h2><ul>'
         + '<li>August payslip — published 8 September</li>'
         + '<li>July payslip — published 8 August</li>'
@@ -1462,16 +1025,16 @@
       return '<div class="pw-signin"><h1>' + esc(page.heading) + '</h1>'
         + '<p class="pw-signin-sub">The sign-in was not completed. You can try '
         + 'again when you are ready.</p>'
-        + '<button type="button" class="pw-btn is-block" data-signin-retry="1">'
-        + 'Sign in again</button></div>';
+        + '<button type="button" class="pw-btn is-block" data-signin-retry="'
+        + esc(page.url) + '">Sign in again</button></div>';
     }
 
-    return '<form class="pw-signin" data-signin="' + esc(page.signin_id) + '">'
+    return '<form class="pw-signin" data-signin="' + esc(page.url) + '">'
       + '<h1>' + esc(page.heading) + '</h1>'
       + '<p class="pw-signin-sub">' + esc(page.subheading || '') + '</p>'
       + '<label class="pw-field"><span class="pw-label">Work email</span>'
       + '<input class="pw-input" type="email" id="pw-signin-user"'
-      + ' value="' + esc(WORLD.learner.email) + '" autocomplete="off"></label>'
+      + ' value="' + esc(SNAP.learner.email) + '" autocomplete="off"></label>'
       + '<label class="pw-field"><span class="pw-label">Password</span>'
       + '<input class="pw-input" type="password" id="pw-signin-pass"'
       + ' autocomplete="off" data-synthetic-only="true"></label>'
@@ -1481,18 +1044,14 @@
   }
 
   function renderBrowserFiles(page) {
-    var location = null;
-    S.files.forEach(function (entry) {
-      if (entry.id === page.location_id) { location = entry; }
-    });
+    var location = findLocation(page.location_id);
     if (!location) { return '<div class="pw-site"><p>Folder unavailable.</p></div>'; }
-
     return '<div class="pw-site">'
       + '<div class="pw-site-head"><h1>' + esc(page.heading) + '</h1>'
       + '<p>' + esc(page.subheading || '') + '</p></div>'
       + '<section class="pw-site-section"><h2>Files</h2><ul>'
-      + location.files.map(function (file) {
-          return '<li>' + esc(file.displayName || file.name)
+      + filesIn(page.location_id).map(function (file) {
+          return '<li>' + esc(file.display_name || file.name)
             + (file.owner ? ' <span class="pw-muted">· ' + esc(file.owner) + '</span>' : '')
             + (file.state === 'unavailable'
                 ? ' <span class="pw-chip is-alert">will not open</span>' : '')
@@ -1502,9 +1061,12 @@
   }
 
   function renderPayments(tab, page) {
-    var invoice = page.invoice;
-    var released = tab.signedIn['payments-released'];
-    var account = tab.accountOverride || invoice.account_of_record;
+    var invoice = page.invoice || {};
+    var released = SNAP.browser.payment_released;
+    var account = APP.browser.accountDraft !== undefined
+      && APP.browser.accountDraft !== null
+      ? APP.browser.accountDraft
+      : (SNAP.browser.payment_account || invoice.account_of_record || '');
 
     if (released) {
       return '<div class="pw-site"><div class="pw-site-head">'
@@ -1513,7 +1075,7 @@
         + '<section class="pw-site-section"><h2>' + esc(invoice.reference) + '</h2><ul>'
         + '<li>' + esc(invoice.supplier) + ' — ' + esc(invoice.amount) + '</li>'
         + '<li>Released to ' + esc(released) + '</li>'
-        + '<li>Released by ' + esc(WORLD.learner.name) + ' at ' + esc(nowLabel()) + '</li>'
+        + '<li>Released by ' + esc(SNAP.learner.name) + '</li>'
         + '</ul></section></div>';
     }
 
@@ -1531,8 +1093,8 @@
       + '<input class="pw-input" id="pw-pay-account" value="' + esc(account) + '"'
       + ' autocomplete="off"></label>'
       + '<div class="pw-row">'
-      + '<button type="button" class="pw-btn is-primary" data-pay-release="1">'
-      + 'Release payment</button>'
+      + '<button type="button" class="pw-btn is-primary" data-pay-release="'
+      + esc(page.url) + '">Release payment</button>'
       + '<button type="button" class="pw-btn" data-pay-reset="1">Restore account of record</button>'
       + '</div>'
       + '<p class="pw-hint" style="margin-top:.7rem">' + esc(page.note) + '</p>'
@@ -1540,18 +1102,20 @@
   }
 
   function renderSupport(page) {
-    var incident = S.incidents['inc-files'];
+    var files = incident('inc-files');
+    var offline = SNAP.session.network_disconnected;
     return '<div class="pw-site">'
       + '<div class="pw-site-head"><h1>' + esc(page.heading) + '</h1>'
       + '<p>' + esc(page.subheading) + '</p></div>'
-      + (incident
+      + (files
           ? '<div class="pw-note is-caution" style="margin-bottom:1rem">'
-            + esc(incident.note) + '</div>' : '')
+            + esc(files.note) + '</div>' : '')
       + '<section class="pw-site-section"><h2>Actions</h2>'
       + '<div class="pw-row">'
-      + '<button type="button" class="pw-btn' + (S.networkDisconnected ? '' : ' is-primary')
-      + '" data-support="isolate"' + (S.networkDisconnected ? ' disabled' : '') + '>'
-      + (S.networkDisconnected ? 'Workstation is disconnected' : 'Disconnect this workstation from the network')
+      + '<button type="button" class="pw-btn' + (offline ? '' : ' is-primary')
+      + '" data-support="isolate"' + (offline ? ' disabled' : '') + '>'
+      + (offline ? 'Workstation is disconnected'
+                 : 'Disconnect this workstation from the network')
       + '</button>'
       + '<button type="button" class="pw-btn" data-support="raise">'
       + 'Raise an incident with the Service Desk</button>'
@@ -1570,45 +1134,34 @@
   // Files
   // =========================================================================
 
-  function findFile(fileId) {
-    var found = null;
-    S.files.forEach(function (location) {
-      location.files.forEach(function (file) {
-        if (file.id === fileId) { found = { file: file, location: location }; }
-      });
-    });
-    return found;
-  }
-
   function renderFiles() {
     var state = APP.files;
-    var current = null;
-    S.files.forEach(function (location) {
-      if (location.id === state.location) { current = location; }
-    });
-    if (!current) { current = S.files[0]; state.location = current.id; }
+    if (!state.location && SNAP.files.locations.length) {
+      state.location = SNAP.files.locations[0].id;
+    }
+    var current = findLocation(state.location);
 
-    var nav = S.files.map(function (location) {
-      var broken = location.files.filter(function (f) {
+    var nav = SNAP.files.locations.map(function (location) {
+      var broken = filesIn(location.id).filter(function (f) {
         return f.state === 'unavailable';
       }).length;
       return '<button type="button" class="pw-navitem'
         + (location.id === state.location ? ' is-active' : '') + '"'
-        + ' data-file-location="' + location.id + '">'
+        + ' data-file-location="' + esc(location.id) + '">'
         + icon('folder') + '<span>' + esc(location.name) + '</span>'
         + (broken ? '<span class="pw-navitem-count">' + broken + '</span>' : '')
         + '</button>';
     }).join('');
 
-    var rows = current.files.map(function (file) {
+    var rows = filesIn(current.id).map(function (file) {
       var unavailable = file.state === 'unavailable';
       return '<button type="button" class="pw-filerow'
         + (unavailable ? ' is-unavailable' : '')
         + (file.state === 'downloaded' ? ' is-new' : '')
         + (state.selected === file.id ? ' is-active' : '') + '"'
-        + ' data-file-select="' + file.id + '">'
+        + ' data-file-select="' + esc(file.id) + '">'
         + icon(unavailable ? 'filex' : fileIcon(file.kind))
-        + '<span class="pw-filerow-name">' + esc(file.displayName || file.name) + '</span>'
+        + '<span class="pw-filerow-name">' + esc(file.display_name || file.name) + '</span>'
         + '<span class="pw-filerow-meta is-optional">' + esc(file.size) + '</span>'
         + '<span class="pw-filerow-meta is-optional">' + esc(file.modified) + '</span>'
         + '<span class="pw-filerow-meta">'
@@ -1618,9 +1171,6 @@
         + '</button>';
     }).join('');
 
-    // A labelled column header, sharing one grid template with the rows. Two
-    // right-aligned numeric columns with nothing at the top of them read as
-    // stray figures rather than as size and date.
     var header = ''
       + '<div class="pw-filehead" aria-hidden="true">'
       + '<span></span><span>Name</span>'
@@ -1635,6 +1185,7 @@
     }
 
     var selected = state.selected ? findFile(state.selected) : null;
+    var files = incident('inc-files');
 
     return ''
       + '<div class="pw-app">'
@@ -1645,9 +1196,9 @@
       + '    <div class="pw-pane-head"><h3>' + esc(current.name) + '</h3>'
       + (current.path ? '<span class="pw-xsmall pw-muted">' + esc(current.path) + '</span>' : '')
       + '</div>'
-      + (S.incidents['inc-files']
+      + (files
           ? '<div class="pw-mailbanner">' + icon('alert')
-            + '<span>' + esc(S.incidents['inc-files'].note)
+            + '<span>' + esc(files.note)
             + ' The Service Desk page in the Browser has the actions.</span></div>'
           : '')
       + header
@@ -1669,18 +1220,18 @@
     var unavailable = file.state === 'unavailable';
     return '<div class="pw-pane-foot" style="display:block">'
       + '<div class="pw-fileinfo" style="padding:0">'
-      + '<div class="pw-row is-between"><b>' + esc(file.displayName || file.name) + '</b>'
+      + '<div class="pw-row is-between"><b>' + esc(file.display_name || file.name) + '</b>'
       + '<span class="pw-row" style="gap:.35rem">'
-      + '<button type="button" class="pw-btn is-sm" data-file-open="' + file.id + '">Open</button>'
-      + '<button type="button" class="pw-btn is-sm" data-file-rename="' + file.id + '">Rename</button>'
-      + '<button type="button" class="pw-btn is-sm is-alert" data-file-delete="' + file.id + '">Delete</button>'
+      + '<button type="button" class="pw-btn is-sm" data-file-open="' + esc(file.id) + '">Open</button>'
+      + '<button type="button" class="pw-btn is-sm" data-file-rename="' + esc(file.id) + '">Rename</button>'
+      + '<button type="button" class="pw-btn is-sm is-alert" data-file-delete="' + esc(file.id) + '">Delete</button>'
       + '</span></div>'
       + (APP.files.renaming === file.id
           ? '<div class="pw-row" style="margin-top:.5rem">'
             + '<input class="pw-input" id="pw-file-rename" style="max-width:20rem" value="'
             + esc(file.name) + '" aria-label="New file name">'
             + '<button type="button" class="pw-btn is-sm is-primary" data-file-rename-save="'
-            + file.id + '">Save</button></div>'
+            + esc(file.id) + '">Save</button></div>'
           : '')
       + '<dl>'
       + '<dt>Location</dt><dd>' + esc(entry.location.name) + '</dd>'
@@ -1692,7 +1243,7 @@
       + (unavailable ? esc(file.note || 'Cannot be opened.') : 'Available')
       + '</dd>'
       + '</dl>'
-      + (file.preview
+      + ((file.preview && file.preview.length)
           ? '<div class="pw-filepreview">'
             + file.preview.map(function (line) { return '<p>' + esc(line) + '</p>'; }).join('')
             + '</div>'
@@ -1704,26 +1255,21 @@
   // Messages
   // =========================================================================
 
-  function markConversationRead(conversationId) {
-    S.conversations.forEach(function (conversation) {
-      if (conversation.id === conversationId) { conversation.unread = false; }
-    });
-  }
-
   function renderMessages() {
     var state = APP.messages;
-    var current = null;
-    S.conversations.forEach(function (conversation) {
-      if (conversation.id === state.conversation) { current = conversation; }
-    });
-    if (!current) { current = S.conversations[0]; state.conversation = current.id; }
+    if (!state.conversation && SNAP.messages.length) {
+      state.conversation = SNAP.messages[0].id;
+    }
+    var current = findConversation(state.conversation) || SNAP.messages[0];
+    if (!current) { return '<div class="pw-empty"><h3>No conversations</h3></div>'; }
+    state.conversation = current.id;
 
-    var list = S.conversations.map(function (conversation) {
-      var last = conversation.messages[conversation.messages.length - 1];
+    var list = SNAP.messages.map(function (conversation) {
+      var last = conversation.entries[conversation.entries.length - 1];
       return '<button type="button" class="pw-convrow'
         + (conversation.id === state.conversation ? ' is-active' : '')
         + (conversation.unread ? ' is-unread' : '') + '"'
-        + ' data-conv-open="' + conversation.id + '">'
+        + ' data-conv-open="' + esc(conversation.id) + '">'
         + '<span class="pw-avatar is-neutral" aria-hidden="true">'
         + esc(conversation.initials) + '</span>'
         + '<span class="pw-convrow-main"><b>' + esc(conversation.name) + '</b>'
@@ -1732,17 +1278,17 @@
         + '</button>';
     }).join('');
 
-    var bubbles = current.messages.map(function (line) {
-      var mine = line.from === WORLD.learner.name;
+    var bubbles = current.entries.map(function (line) {
+      var mine = line.from === SNAP.learner.name;
       return '<div class="pw-bubble ' + (mine ? 'is-me' : 'is-them') + '">'
         + esc(line.text)
         + '<span class="pw-bubble-meta">' + esc(mine ? 'You' : line.from)
         + ' · ' + esc(line.when) + '</span></div>';
     }).join('');
 
-    var verify = current.verification_reply
-      ? '<button type="button" class="pw-btn is-sm" data-conv-verify="' + current.id + '">'
-        + esc(current.verification_reply.prompt) + '</button>'
+    var verify = current.verify_prompt
+      ? '<button type="button" class="pw-btn is-sm" data-conv-verify="' + esc(current.id) + '">'
+        + esc(current.verify_prompt) + '</button>'
       : '';
 
     return ''
@@ -1764,7 +1310,7 @@
       + '      <input class="pw-input" id="pw-msg-input" placeholder="Write a message"'
       + '        aria-label="Message" value="' + esc(state.draft) + '" style="flex:1">'
       + '      <button type="button" class="pw-btn is-sm is-primary" data-msg-send="'
-      + current.id + '">Send</button>'
+      + esc(current.id) + '">Send</button>'
       + '    </div>'
       + '  </div>'
       + '</div>';
@@ -1775,39 +1321,36 @@
   // =========================================================================
 
   function renderAuthenticator() {
-    var pending = S.prompts.filter(function (p) { return p.status === 'pending'; });
-
-    var prompts = pending.map(function (prompt) {
-      var open = !!APP.authenticator.details[prompt.uid];
-      var surface = prompt.surface;
+    var prompts = SNAP.authenticator.requests.map(function (entry) {
+      var open = !!APP.authenticator.details[entry.id] && entry.details;
       return '<div class="pw-authprompt">'
         + '<div class="pw-row" style="align-items:flex-start">'
         + '<div style="flex:1;min-width:0">'
-        + '<h3>Approve sign-in to ' + esc(surface.app) + '?</h3>'
-        + '<p class="pw-authsub">Requested ' + esc(prompt.arrivedAt) + '</p>'
+        + '<h3>Approve sign-in to ' + esc(entry.app) + '?</h3>'
+        + '<p class="pw-authsub">Requested ' + esc(entry.arrived) + '</p>'
         + '</div>'
         + '<span class="pw-authnum" aria-label="Number shown on the sign-in screen">'
-        + esc(surface.number_match) + '</span>'
+        + esc(entry.number_match) + '</span>'
         + '</div>'
         + (open
             ? '<dl class="pw-authgrid">'
-              + '<dt>Application</dt><dd>' + esc(surface.app) + '</dd>'
-              + '<dt>Device</dt><dd>' + esc(surface.device) + '</dd>'
-              + '<dt>Location</dt><dd>' + esc(surface.location) + '</dd>'
-              + '<dt>Network</dt><dd>' + esc(surface.network) + '</dd>'
-              + '<dt>Address</dt><dd>' + esc(surface.ip_class) + '</dd>'
+              + '<dt>Application</dt><dd>' + esc(entry.app) + '</dd>'
+              + '<dt>Device</dt><dd>' + esc(entry.details.device) + '</dd>'
+              + '<dt>Location</dt><dd>' + esc(entry.details.location) + '</dd>'
+              + '<dt>Network</dt><dd>' + esc(entry.details.network) + '</dd>'
+              + '<dt>Address</dt><dd>' + esc(entry.details.ip_class) + '</dd>'
               + '</dl>'
             : '')
-        // Approve and Deny are drawn identically, and neither is emphasised.
-        // A primary Approve is a nudge towards approving, and the whole
-        // point of the prompt is that the context above it -- not the shape
-        // of the buttons -- is what a learner should be reading.
+        // Approve and Deny are drawn identically and neither is emphasised.
+        // A primary Approve is a nudge towards approving, and the point of the
+        // prompt is that the context above it — not the shape of the buttons —
+        // is what a learner should be reading.
         + '<div class="pw-authactions">'
         + '<button type="button" class="pw-btn is-sm" data-mfa-approve="'
-        + prompt.uid + '">Approve</button>'
-        + '<button type="button" class="pw-btn is-sm" data-mfa-deny="' + prompt.uid + '">Deny</button>'
+        + esc(entry.id) + '">Approve</button>'
+        + '<button type="button" class="pw-btn is-sm" data-mfa-deny="' + esc(entry.id) + '">Deny</button>'
         + '<button type="button" class="pw-btn is-sm is-quiet" data-mfa-details="'
-        + prompt.uid + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
+        + esc(entry.id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
         + (open ? 'Hide details' : 'Details') + '</button>'
         + '</div></div>';
     }).join('');
@@ -1815,10 +1358,10 @@
     if (!prompts) {
       prompts = '<div class="pw-empty"><h3>Nothing waiting</h3>'
         + '<p>Approval requests appear here when something asks to sign in as '
-        + esc(WORLD.learner.name) + '.</p></div>';
+        + esc(SNAP.learner.name) + '.</p></div>';
     }
 
-    var history = S.authHistory.map(function (entry) {
+    var history = SNAP.authenticator.history.map(function (entry) {
       return '<div class="pw-authrow">'
         + '<span class="pw-dot' + (String(entry.result).indexOf('Denied') === 0
             ? ' is-caution' : entry.result === 'Approved' ? ' is-good' : ' is-accent')
@@ -1834,11 +1377,12 @@
       + '  <div class="pw-pane pw-mainpane">'
       + '    <div class="pw-pane-head"><h3>Waiting for you</h3>'
       + '<span class="pw-spacer"></span>'
-      + '<span class="pw-chip is-plain">' + esc(WORLD.learner.email) + '</span></div>'
+      + '<span class="pw-chip is-plain">' + esc(SNAP.learner.email) + '</span></div>'
       + '    <div class="pw-pane-scroll">' + prompts
       + '      <div class="pw-pane-head" style="border-top:1px solid var(--p-line)">'
       + '        <h3>Recent activity</h3><span class="pw-spacer"></span>'
-      + '        <button type="button" class="pw-btn is-sm is-quiet" data-auth-history="1">'
+      + '        <button type="button" class="pw-btn is-sm is-quiet" data-auth-history="1"'
+      + (SNAP.authenticator.history_observed ? ' aria-pressed="true"' : '') + '>'
       + 'I checked this</button>'
       + '      </div>'
       + history
@@ -1854,7 +1398,7 @@
   function renderDirectory() {
     var state = APP.directory;
     var term = state.search.trim().toLowerCase();
-    var contacts = WORLD.directory.filter(function (contact) {
+    var contacts = SNAP.directory.filter(function (contact) {
       if (!term) { return true; }
       return [contact.name, contact.role, contact.department, contact.email]
         .join(' ').toLowerCase().indexOf(term) >= 0;
@@ -1863,7 +1407,7 @@
     var rows = contacts.map(function (contact) {
       return '<button type="button" class="pw-dirrow'
         + (state.selected === contact.id ? ' is-active' : '') + '"'
-        + ' data-dir-open="' + contact.id + '">'
+        + ' data-dir-open="' + esc(contact.id) + '">'
         + '<span class="pw-avatar is-neutral" aria-hidden="true">'
         + esc(contact.initials) + '</span>'
         + '<span class="pw-dirrow-main"><b>' + esc(contact.name) + '</b>'
@@ -1872,10 +1416,7 @@
         + '</button>';
     }).join('') || '<div class="pw-empty"><h3>No match</h3></div>';
 
-    var selected = null;
-    WORLD.directory.forEach(function (contact) {
-      if (contact.id === state.selected) { selected = contact; }
-    });
+    var selected = state.selected ? findContact(state.selected) : null;
 
     return ''
       + '<div class="pw-app' + (state.mobileDetail ? ' is-split-mobile' : '') + '">'
@@ -1891,14 +1432,13 @@
       + '  <div class="pw-pane pw-mainpane">'
       + (selected ? renderContact(selected)
                   : '<div class="pw-empty"><h3>Directory</h3>'
-                    + '<p>The organisation\'s own record of who people are and '
+                    + '<p>The organisation&#39;s own record of who people are and '
                     + 'how to reach them.</p></div>')
       + '  </div>'
       + '</div>';
   }
 
   function renderContact(contact) {
-    var state = APP.directory;
     return '<div class="pw-pane-head">'
       + '<button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-dir-back="1">'
       + icon('back') + '</button>'
@@ -1918,14 +1458,14 @@
       + '</dl>'
       + (contact.note ? '<div class="pw-note" style="margin-top:.9rem">'
           + esc(contact.note) + '</div>' : '')
-      + (contact.callback
+      + (contact.can_call
           ? '<div class="pw-row" style="margin-top:1rem">'
-            + '<button type="button" class="pw-btn" data-dir-call="' + contact.id + '">'
+            + '<button type="button" class="pw-btn" data-dir-call="' + esc(contact.id) + '">'
             + 'Call ' + esc(contact.extension) + '</button></div>'
           : '')
-      + (state.call && state.call.id === contact.id
+      + (contact.call_result
           ? '<div class="pw-note is-accent" style="margin-top:.8rem">'
-            + esc(state.call.text) + '</div>'
+            + esc(contact.call_result) + '</div>'
           : '')
       + '</div></div>';
   }
@@ -1933,19 +1473,24 @@
   // =========================================================================
   // Notes
   // =========================================================================
+  //
+  // The only application where the clipboard is allowed, and the only place
+  // learner-authored text is deliberately kept. What is stored is what the
+  // learner typed into this notebook — nothing about what was copied, nothing
+  // about what was pasted, and no record that a paste happened at all.
 
   function renderNotes() {
     var state = APP.notes;
-    if (!state.selected && S.notes.length) { state.selected = S.notes[0].id; }
+    if (!state.selected && SNAP.notes.length) { state.selected = SNAP.notes[0].id; }
     var current = null;
-    S.notes.forEach(function (note) {
+    SNAP.notes.forEach(function (note) {
       if (note.id === state.selected) { current = note; }
     });
 
-    var rows = S.notes.map(function (note) {
+    var rows = SNAP.notes.map(function (note) {
       return '<button type="button" class="pw-noterow'
         + (note.id === state.selected ? ' is-active' : '') + '"'
-        + ' data-note-open="' + note.id + '">'
+        + ' data-note-open="' + esc(note.id) + '">'
         + '<b>' + esc(note.title || 'Untitled') + '</b>'
         + '<span>' + esc(note.updated) + '</span></button>';
     }).join('') || '<div class="pw-empty"><h3>No notes</h3></div>';
@@ -1968,7 +1513,7 @@
             + '<span class="pw-xsmall pw-muted">Saved automatically</span>'
             + '<span class="pw-spacer"></span>'
             + '<button type="button" class="pw-btn is-sm is-alert" data-note-delete="'
-            + current.id + '">Delete note</button>'
+            + esc(current.id) + '">Delete note</button>'
             + '</div></div>'
           : '<div class="pw-empty"><h3>No note selected</h3></div>')
       + '  </div>'
@@ -1981,11 +1526,11 @@
 
   function renderNotifications() {
     var list = qs('#pw-notiflist');
-    if (!S.notifications.length) {
+    if (!SNAP.notifications.length) {
       list.innerHTML = '<div class="pw-empty"><h3>Nothing new</h3></div>';
       return;
     }
-    list.innerHTML = S.notifications.map(function (entry) {
+    list.innerHTML = SNAP.notifications.map(function (entry) {
       return '<div class="pw-notif' + (entry.unread ? ' is-unread' : '') + '">'
         + '<span class="pw-notif-icon is-' + esc(entry.kind) + '">'
         + icon(notifIcon(entry.kind)) + '</span>'
@@ -1995,7 +1540,7 @@
         + (entry.opens
             ? '<span class="pw-notif-actions">'
               + '<button type="button" class="pw-btn is-sm" data-notif-open="'
-              + entry.id + '">Open</button></span>'
+              + esc(entry.id) + '">Open</button></span>'
             : '')
         + '</span></div>';
     }).join('');
@@ -2012,17 +1557,40 @@
 
   var TOAST_LIMIT = 3;
 
+  /* Toasts are drawn for notifications that are new *to this client* since
+   * the last snapshot. They are pure presentation: every one of them is
+   * already in the notification panel, so a missed toast loses nothing.
+   *
+   * The first snapshot of a session never toasts. A learner who refreshes an
+   * hour into a session has not just received nine things; they are looking
+   * again at a mailbox that already contained them, and replaying the whole
+   * backlog as if it had just landed would misrepresent the world -- loudly.
+   */
+  var toastsPrimed = false;
+
+  function syncToasts() {
+    var fresh = [];
+    SNAP.notifications.forEach(function (entry) {
+      if (!seenNotifications[entry.id]) {
+        seenNotifications[entry.id] = true;
+        if (entry.unread) { fresh.push(entry); }
+      }
+    });
+    if (!toastsPrimed) {
+      toastsPrimed = true;
+      return;
+    }
+    fresh.sort(function (a, b) { return a.order - b.order; });
+    fresh.slice(-TOAST_LIMIT).forEach(showToast);
+  }
+
   function showToast(entry) {
     var host = qs('#pw-toasts');
-
-    // Bounded on purpose. A workstation that stacks nine cards down the
-    // screen is not conveying urgency, it is hiding the work. Older toasts
-    // drop off; nothing is lost, because every one of them is still in the
-    // notification panel.
+    // Bounded on purpose. A workstation that stacks nine cards down the screen
+    // is not conveying urgency, it is hiding the work.
     while (host.children.length >= TOAST_LIMIT) {
       host.removeChild(host.firstChild);
     }
-
     var node = document.createElement('div');
     node.className = 'pw-toast';
     node.innerHTML = '<span class="pw-notif-icon is-' + esc(entry.kind) + '">'
@@ -2031,39 +1599,68 @@
       + '<p>' + esc(entry.body) + '</p></span>'
       + (entry.opens
           ? '<button type="button" class="pw-btn is-sm" data-notif-open="'
-            + entry.id + '">Open</button>' : '')
+            + esc(entry.id) + '">Open</button>' : '')
       + '<button type="button" class="pw-toast-close" aria-label="Dismiss">&times;</button>';
     host.appendChild(node);
-
     node.querySelector('.pw-toast-close').addEventListener('click', function () {
       retireToast(node);
     });
-
-    var handle = setTimeout(function () { retireToast(node); }, 9000);
-    timers.push(handle);
+    window.setTimeout(function () { retireToast(node); }, 9000);
   }
 
-  // A toast slides out rather than blinking off, and is removed after. It is
-  // still a child of the stack while it leaves, so it still counts against
-  // TOAST_LIMIT -- which is the conservative side of that trade: the bound on
-  // how many cards can be on screen at once stays exactly what it was.
   function retireToast(node) {
     if (!node.parentNode || node.classList.contains('is-leaving')) { return; }
-
     if (prefersReducedMotion()) {
       node.parentNode.removeChild(node);
       return;
     }
-
     node.classList.add('is-leaving');
-    var handle = setTimeout(function () {
+    window.setTimeout(function () {
       if (node.parentNode) { node.parentNode.removeChild(node); }
     }, 200);
-    timers.push(handle);
+  }
+
+  function showTransient(text) {
+    showToast({ id: 'transient-' + Date.now(), kind: 'system',
+                title: 'Workstation', body: text, opens: null });
   }
 
   // =========================================================================
-  // Action handling
+  // The safer-alternative comparison  (architecture §12, provisional)
+  // =========================================================================
+  //
+  // Entirely server-decided. In an Assessment attempt the snapshot has no
+  // ``comparison`` at all — there is nothing here to hide, reveal or style
+  // around. Continue posts an acknowledgement, which dismisses the
+  // explanation and changes no factual state: the world the learner returns to
+  // is the one their decision produced.
+
+  var comparisonShown = null;
+
+  function renderComparison() {
+    var comparison = SNAP.comparison;
+    if (!comparison) { comparisonShown = null; return; }
+    if (comparisonShown === comparison.decision) { return; }
+    if (!window.RewindSecComparison) {
+      send('session.acknowledge');
+      return;
+    }
+    comparisonShown = comparison.decision;
+    window.RewindSecComparison.show({
+      heading: comparison.heading,
+      what_you_did: comparison.what_you_did,
+      what_followed: comparison.what_followed,
+      evidence: comparison.evidence,
+      safer_process: comparison.safer_process,
+      likely_outcome: comparison.likely_outcome,
+      still_true: comparison.still_true
+    }).then(function () {
+      send('session.acknowledge');
+    });
+  }
+
+  // =========================================================================
+  // Input
   // =========================================================================
 
   function closestData(target, attribute) {
@@ -2078,58 +1675,52 @@
   }
 
   function bindWindow(node, appId) {
-    node.addEventListener('mousedown', function () { focusApp(appId); });
-    node.addEventListener('focusin', function () { focusApp(appId); });
-
-    qsa('[data-win]', node).forEach(function (button) {
-      button.addEventListener('click', function (event) {
-        event.stopPropagation();
-        var action = button.getAttribute('data-win');
-        if (action === 'close') { closeApp(appId); }
-        else if (action === 'minimise') { minimiseApp(appId); }
-        else {
-          WIN[appId].maximized = !WIN[appId].maximized;
-          render();
-        }
-      });
+    node.addEventListener('mousedown', function () {
+      focusApp(appId);
+      raiseWindow(node);
+    });
+    node.addEventListener('click', function (event) {
+      var close = closestData(event.target, 'data-win-close');
+      if (close) { closeApp(close.value); return; }
+      var min = closestData(event.target, 'data-win-min');
+      if (min) { minimiseApp(min.value); }
     });
 
-    var bar = qs('.pw-winbar', node);
-    bar.addEventListener('pointerdown', function (event) {
-      if (!canDrag() || WIN[appId].maximized) { return; }
-      if (closestData(event.target, 'data-win')) { return; }
+    var drag = null;
+    node.addEventListener('mousedown', function (event) {
+      var handle = closestData(event.target, 'data-drag');
+      if (!handle || !canDrag()) { return; }
+      if (closestData(event.target, 'data-win-close')
+          || closestData(event.target, 'data-win-min')) { return; }
+      var win = WIN[appId];
+      drag = { x: event.clientX, y: event.clientY, ox: win.x, oy: win.y };
       event.preventDefault();
-      var start = { x: event.clientX, y: event.clientY,
-                    left: WIN[appId].x, top: WIN[appId].y };
+    });
+    document.addEventListener('mousemove', function (event) {
+      if (!drag) { return; }
+      var win = WIN[appId];
       var size = areaSize();
-      bar.setPointerCapture(event.pointerId);
-
-      function move(moveEvent) {
-        WIN[appId].x = clamp(start.left + (moveEvent.clientX - start.x),
-                             -WIN[appId].w + 120, size.w - 80);
-        WIN[appId].y = clamp(start.top + (moveEvent.clientY - start.y),
-                             0, size.h - 40);
-        node.style.left = WIN[appId].x + 'px';
-        node.style.top = WIN[appId].y + 'px';
-      }
-      function up() {
-        bar.removeEventListener('pointermove', move);
-        bar.removeEventListener('pointerup', up);
-      }
-      bar.addEventListener('pointermove', move);
-      bar.addEventListener('pointerup', up);
+      win.x = clamp(drag.ox + (event.clientX - drag.x), 4, Math.max(4, size.w - win.w - 4));
+      win.y = clamp(drag.oy + (event.clientY - drag.y), 4, Math.max(4, size.h - win.h - 4));
+      node.style.left = win.x + 'px';
+      node.style.top = win.y + 'px';
     });
+    document.addEventListener('mouseup', function () { drag = null; });
+  }
 
-    bar.addEventListener('dblclick', function () {
-      WIN[appId].maximized = !WIN[appId].maximized;
-      render();
-    });
+  function raiseWindow(node) {
+    var appId = node.id.replace('pw-win-', '');
+    if (WIN[appId]) {
+      WIN[appId].z = (zCounter += 1);
+      node.style.zIndex = WIN[appId].z;
+    }
   }
 
   function handleClick(event) {
+    if (!SNAP) { return; }
     var hit;
 
-    // -- rail ------------------------------------------------------------
+    // -- rail ---------------------------------------------------------------
     hit = closestData(event.target, 'data-app');
     if (hit) {
       var appId = hit.value;
@@ -2142,7 +1733,7 @@
       return;
     }
 
-    // -- mail --------------------------------------------------------------
+    // -- mail ---------------------------------------------------------------
     hit = closestData(event.target, 'data-mail-folder');
     if (hit) { APP.mail.folder = hit.value; APP.mail.search = ''; render(); return; }
 
@@ -2155,11 +1746,8 @@
     hit = closestData(event.target, 'data-mail-headers');
     if (hit) {
       APP.mail.headers = !APP.mail.headers;
-      if (APP.mail.headers) {
-        observe('inspect_headers:' + hit.value,
-                'Opened the full header on a message');
-      }
       render();
+      if (APP.mail.headers) { send('mail.inspect_headers', hit.value); }
       return;
     }
 
@@ -2167,32 +1755,54 @@
     if (hit) {
       var wasShown = APP.mail.linkShown === hit.value;
       APP.mail.linkShown = wasShown ? null : hit.value;
-      if (!wasShown) {
-        observe('inspect_link:' + hit.value.split(':')[0],
-                'Checked where a link in a message goes');
-      }
       render();
+      if (!wasShown) {
+        var parts = hit.value.split(':');
+        send('mail.inspect_link', parts[0], { index: Number(parts[1]) });
+      }
       return;
     }
 
     hit = closestData(event.target, 'data-mail-link');
-    if (hit) { browserNavigate(hit.value); return; }
+    if (hit) {
+      // The destination is not held here unless it was inspected, so the
+      // server resolves it: the client says "the second link on that message".
+      var linkParts = hit.value.split(':');
+      openApp('browser');
+      send('mail.open_link', linkParts[0], { index: Number(linkParts[1]) })
+        .then(function (payload) {
+          if (payload && payload.notice && payload.notice.url) {
+            var tab = ensureTab();
+            tab.history = tab.history.slice(0, tab.index + 1);
+            tab.history.push(payload.notice.url);
+            tab.index = tab.history.length - 1;
+            tab.url = payload.notice.url;
+            tab.urlDraft = null;
+            render();
+          }
+        });
+      return;
+    }
 
     hit = closestData(event.target, 'data-att-inspect');
     if (hit) {
       var attKey = 'att:' + hit.value;
       var open = APP.mail.linkShown === attKey;
       APP.mail.linkShown = open ? null : attKey;
-      if (!open) {
-        observe('inspect_attachment:' + hit.value.split(':')[0],
-                'Looked at the details of an attachment');
-      }
       render();
+      if (!open) {
+        var attParts = hit.value.split(':');
+        send('mail.inspect_attachment', attParts[0], { index: Number(attParts[1]) });
+      }
       return;
     }
 
     hit = closestData(event.target, 'data-att-download');
-    if (hit) { downloadAttachment(hit.value); return; }
+    if (hit) {
+      var dl = hit.value.split(':');
+      send('mail.download_attachment', dl[0], { index: Number(dl[1]) });
+      return;
+    }
 
     hit = closestData(event.target, 'data-mail-reply');
     if (hit) {
@@ -2206,16 +1816,23 @@
     if (hit) { APP.mail.composing = null; APP.mail.draft = ''; render(); return; }
 
     hit = closestData(event.target, 'data-mail-send');
-    if (hit) { sendReply(hit.value); return; }
+    if (hit) {
+      var box = qs('#pw-compose-body');
+      var text = (box ? box.value : APP.mail.draft);
+      APP.mail.composing = null;
+      APP.mail.draft = '';
+      send('mail.reply', hit.value, { text: text });
+      return;
+    }
 
     hit = closestData(event.target, 'data-mail-forward');
-    if (hit) { forwardMessage(hit.value); return; }
+    if (hit) { send('mail.forward', hit.value); return; }
 
     hit = closestData(event.target, 'data-mail-report');
-    if (hit) { reportMessage(hit.value); return; }
+    if (hit) { APP.mail.selected = null; send('mail.report', hit.value); return; }
 
     hit = closestData(event.target, 'data-mail-delete');
-    if (hit) { deleteMessage(hit.value); return; }
+    if (hit) { APP.mail.selected = null; send('mail.delete', hit.value); return; }
 
     // -- browser ------------------------------------------------------------
     hit = closestData(event.target, 'data-tab-close');
@@ -2233,8 +1850,8 @@
     hit = closestData(event.target, 'data-tab-new');
     if (hit) {
       APP.browser.tabs.push({
-        url: WORLD.browser.home, history: [WORLD.browser.home], index: 0,
-        signedIn: {}, pending: null, accountOverride: null, urlDraft: null
+        url: SNAP.browser.home, history: [SNAP.browser.home], index: 0,
+        urlDraft: null
       });
       APP.browser.active = APP.browser.tabs.length - 1;
       render();
@@ -2257,36 +1874,32 @@
     if (hit) { browserNavigate(hit.value); return; }
 
     hit = closestData(event.target, 'data-signin-retry');
-    if (hit) {
-      var retryTab = ensureTab();
-      delete retryTab.signedIn[retryTab.url];
-      render();
-      return;
-    }
+    if (hit) { send('browser.sign_in_retry', null, { url: hit.value }); return; }
 
     hit = closestData(event.target, 'data-pay-release');
-    if (hit) { releasePayment(); return; }
+    if (hit) { releasePayment(hit.value); return; }
 
     hit = closestData(event.target, 'data-pay-reset');
-    if (hit) {
-      ensureTab().accountOverride = null;
-      render();
-      return;
-    }
+    if (hit) { APP.browser.accountDraft = null; render(); return; }
 
     hit = closestData(event.target, 'data-support');
-    if (hit) { supportAction(hit.value); return; }
+    if (hit) { send('browser.support_action', null, { choice: hit.value }); return; }
 
     // -- files ---------------------------------------------------------------
     hit = closestData(event.target, 'data-file-location');
-    if (hit) { APP.files.location = hit.value; APP.files.selected = null; render(); return; }
+    if (hit) {
+      APP.files.location = hit.value;
+      APP.files.selected = null;
+      render();
+      return;
+    }
 
     hit = closestData(event.target, 'data-file-select');
     if (hit) {
       APP.files.selected = hit.value;
       APP.files.renaming = false;
-      observe('inspect_file:' + hit.value);
       render();
+      send('files.inspect', hit.value);
       return;
     }
 
@@ -2299,29 +1912,34 @@
     hit = closestData(event.target, 'data-file-rename-save');
     if (hit) {
       var input = qs('#pw-file-rename');
-      var entry = findFile(hit.value);
-      if (input && entry && input.value.trim()) {
-        entry.file.name = input.value.trim();
-        entry.file.displayName = entry.file.state === 'unavailable'
-          ? entry.file.name + '.demo_locked' : null;
-        record('action', 'Renamed a file to ' + entry.file.name, 'Files');
-      }
+      var name = input ? input.value.trim() : '';
       APP.files.renaming = false;
-      render();
+      if (name) { send('files.rename', hit.value, { name: name }); }
+      else { render(); }
       return;
     }
 
     hit = closestData(event.target, 'data-file-delete');
-    if (hit) { deleteFile(hit.value); return; }
+    if (hit) {
+      var entry = findFile(hit.value);
+      if (!entry) { return; }
+      var fileId = hit.value;
+      confirmDialog('Delete ' + entry.file.name + '?',
+        'It will be removed from ' + entry.location.name + '.',
+        function () {
+          APP.files.selected = null;
+          send('files.delete', fileId);
+        });
+      return;
+    }
 
     // -- messages -------------------------------------------------------------
     hit = closestData(event.target, 'data-conv-open');
     if (hit) {
       APP.messages.conversation = hit.value;
       APP.messages.mobileDetail = true;
-      markConversationRead(hit.value);
-      observe('open_conversation:' + hit.value);
       render();
+      send('messages.open', hit.value);
       return;
     }
 
@@ -2329,18 +1947,16 @@
     if (hit) { APP.messages.mobileDetail = false; render(); return; }
 
     hit = closestData(event.target, 'data-conv-verify');
-    if (hit) { verifyThroughMessages(hit.value); return; }
+    if (hit) { send('messages.verify', hit.value); return; }
 
     hit = closestData(event.target, 'data-msg-send');
     if (hit) {
-      var box = qs('#pw-msg-input');
-      var text = box ? box.value.trim() : '';
-      if (text) {
-        appendMessage(hit.value, WORLD.learner.name, text);
+      var msgBox = qs('#pw-msg-input');
+      var msgText = msgBox ? msgBox.value.trim() : '';
+      if (msgText) {
         APP.messages.draft = '';
-        record('action', 'Sent a message', hit.value);
+        send('messages.send', hit.value, { text: msgText });
       }
-      render();
       return;
     }
 
@@ -2348,35 +1964,29 @@
     hit = closestData(event.target, 'data-mfa-details');
     if (hit) {
       APP.authenticator.details[hit.value] = !APP.authenticator.details[hit.value];
-      if (APP.authenticator.details[hit.value]) {
-        observe('inspect_mfa:' + hit.value.split('-').slice(0, 2).join('-'),
-                'Opened the details on an approval request');
-      }
       render();
+      if (APP.authenticator.details[hit.value]) {
+        send('auth.inspect_request', hit.value);
+      }
       return;
     }
 
     hit = closestData(event.target, 'data-auth-history');
-    if (hit) {
-      observe('open_auth_history', 'Checked your own approval history');
-      render();
-      return;
-    }
+    if (hit) { send('auth.inspect_history'); return; }
 
     hit = closestData(event.target, 'data-mfa-approve');
-    if (hit) { resolvePrompt(hit.value, true); return; }
+    if (hit) { send('auth.approve', hit.value); return; }
 
     hit = closestData(event.target, 'data-mfa-deny');
-    if (hit) { resolvePrompt(hit.value, false); return; }
+    if (hit) { send('auth.deny', hit.value); return; }
 
     // -- directory ---------------------------------------------------------------
     hit = closestData(event.target, 'data-dir-open');
     if (hit) {
       APP.directory.selected = hit.value;
       APP.directory.mobileDetail = true;
-      APP.directory.call = null;
-      observe('open_contact:' + hit.value, 'Opened a Directory record');
       render();
+      send('directory.open', hit.value);
       return;
     }
 
@@ -2384,27 +1994,33 @@
     if (hit) { APP.directory.mobileDetail = false; render(); return; }
 
     hit = closestData(event.target, 'data-dir-call');
-    if (hit) { callContact(hit.value); return; }
+    if (hit) { send('directory.call', hit.value); return; }
 
     // -- notes ---------------------------------------------------------------------
     hit = closestData(event.target, 'data-note-open');
-    if (hit) { APP.notes.selected = hit.value; observe('open_notes'); render(); return; }
+    if (hit) {
+      APP.notes.selected = hit.value;
+      render();
+      send('notes.open', hit.value);
+      return;
+    }
 
     hit = closestData(event.target, 'data-note-new');
     if (hit) {
-      var id = 'note-' + Date.now();
-      S.notes.unshift({ id: id, title: 'New note', updated: nowLabel(), body: '' });
-      APP.notes.selected = id;
-      record('action', 'Started a new note', 'Notes');
-      render();
+      send('notes.create').then(function (payload) {
+        if (payload && payload.notice && payload.notice.note) {
+          APP.notes.selected = payload.notice.note;
+          render();
+        }
+      });
       return;
     }
 
     hit = closestData(event.target, 'data-note-delete');
     if (hit) {
-      S.notes = S.notes.filter(function (note) { return note.id !== hit.value; });
-      APP.notes.selected = S.notes.length ? S.notes[0].id : null;
-      render();
+      var noteId = hit.value;
+      APP.notes.selected = null;
+      send('notes.delete', noteId);
       return;
     }
 
@@ -2412,439 +2028,55 @@
     hit = closestData(event.target, 'data-notif-open');
     if (hit) {
       var target = null;
-      S.notifications.forEach(function (entry) {
-        if (entry.id === hit.value) { entry.unread = false; target = entry.opens; }
+      SNAP.notifications.forEach(function (entry) {
+        if (entry.id === hit.value) { target = entry.opens; }
       });
-      if (target) { openApp(target.app, target); }
-      render();
+      send('notifications.open', hit.value).then(function () {
+        if (target) { openApp(target.app, target); }
+      });
       return;
     }
-  }
-
-  // =========================================================================
-  // Consequential learner actions
-  // =========================================================================
-
-  function downloadAttachment(key) {
-    var parts = key.split(':');
-    var message = findMail(parts[0]);
-    if (!message) { return; }
-    var attachment = message.surface.attachments[Number(parts[1])];
-    if (!attachment) { return; }
-
-    var downloads = null;
-    S.files.forEach(function (location) {
-      if (location.id === 'loc-downloads') { downloads = location; }
-    });
-    if (!downloads) { return; }
-
-    var existing = downloads.files.filter(function (file) {
-      return file.name === attachment.name;
-    })[0];
-
-    if (!existing) {
-      downloads.files.unshift({
-        id: 'f-dl-' + parts[0] + '-' + parts[1],
-        name: attachment.name,
-        kind: attachment.kind === 'spreadsheet-macro' ? 'spreadsheet' : attachment.kind,
-        size: attachment.size,
-        modified: nowLabel(),
-        state: 'downloaded',
-        source: message.surface.from_address,
-        hostileOpen: message.analysis && message.analysis.disposition === 'hostile'
-      });
-    }
-
-    record('action', 'Downloaded ' + attachment.name,
-           'From ' + message.surface.from_address);
-    markResolved(message.id);
-
-    if (message.id === 'm-rate-card') {
-      decide('d-ransom-download', { where: 'Mail' });
-    }
-
-    pushNotification({
-      kind: 'system',
-      title: 'Download complete',
-      body: attachment.name + ' is in your Downloads folder.',
-      opens: { app: 'files', location_id: 'loc-downloads' }
-    });
-    render();
   }
 
   function openFile(fileId) {
     var entry = findFile(fileId);
     if (!entry) { return; }
     var file = entry.file;
-
-    if (file.state === 'unavailable') {
-      pushNotification({
-        kind: 'file',
-        title: 'Cannot open ' + file.name,
-        body: file.note || 'The file could not be read.',
-        opens: null
-      });
-      render();
-      return;
-    }
-
-    if (file.hostileOpen) {
-      confirmDialog(
-        'Open ' + file.name + '?',
+    if (file.state !== 'unavailable' && file.macro) {
+      confirmDialog('Open ' + file.name + '?',
         'This workbook wants to run its own content when it opens.',
-        function () {
-          record('action', 'Opened ' + file.name, entry.location.name);
-          decide('d-ransom-open', {
-            where: 'Files → ' + entry.location.name,
-            evidence: relevantEvidenceFor('m-rate-card')
-          });
-        });
+        function () { send('files.open', fileId); });
       return;
     }
-
-    record('action', 'Opened ' + (file.displayName || file.name), entry.location.name);
-    pushNotification({
-      kind: 'system',
-      title: file.name,
-      body: 'Opened in the document viewer.',
-      opens: null
-    });
-    render();
+    send('files.open', fileId);
   }
 
-  function deleteFile(fileId) {
-    var entry = findFile(fileId);
-    if (!entry) { return; }
-    confirmDialog('Delete ' + entry.file.name + '?',
-      'It will be removed from ' + entry.location.name + '.',
-      function () {
-        entry.location.files = entry.location.files.filter(function (file) {
-          return file.id !== fileId;
-        });
-        APP.files.selected = null;
-        record('action', 'Deleted ' + entry.file.name, entry.location.name);
-        render();
-      });
-  }
-
-  function reportMessage(messageId) {
-    var message = findMail(messageId);
-    if (!message) { return; }
-
-    message.folder = 'reported';
-    message.reported = true;
-    message.unread = false;
-    APP.mail.selected = null;
-    markResolved(messageId);
-    record('action', 'Reported: ' + message.surface.subject, 'Mail');
-
-    var hostile = message.analysis && message.analysis.disposition === 'hostile';
-    var decisionId = hostile
-      ? (REPORT_DECISION[messageId] || 'd-phish-report')
-      : 'd-report-legitimate';
-
-    decide(decisionId, {
-      where: 'Mail',
-      evidence: relevantEvidenceFor(messageId)
-    });
-  }
-
-  function deleteMessage(messageId) {
-    var message = findMail(messageId);
-    if (!message) { return; }
-    message.folder = 'deleted';
-    message.unread = false;
-    APP.mail.selected = null;
-    markResolved(messageId);
-    record('action', 'Deleted: ' + message.surface.subject, 'Mail');
-
-    if (message.analysis && message.analysis.disposition === 'hostile') {
-      S.deletedHostile += 1;
-      if (messageId === 'm-payroll-restructure') {
-        decide('d-phish-delete', { where: 'Mail',
-                                   evidence: relevantEvidenceFor(messageId) });
-        return;
-      }
-    }
-    render();
-  }
-
-  function forwardMessage(messageId) {
-    var message = findMail(messageId);
-    if (!message) { return; }
-    message.forwarded = true;
-    record('action', 'Forwarded: ' + message.surface.subject, 'Mail');
-    pushNotification({
-      kind: 'mail', title: 'Message forwarded',
-      body: message.surface.subject, opens: null
-    });
-    render();
-  }
-
-  function sendReply(messageId) {
-    var message = findMail(messageId);
-    var box = qs('#pw-compose-body');
-    if (!message) { return; }
-    var text = (box ? box.value : APP.mail.draft).trim();
-
-    message.repliedAt = nowLabel();
-    APP.mail.composing = null;
-    APP.mail.draft = '';
-    markResolved(messageId);
-    record('action', 'Replied to ' + message.surface.from_name,
-           message.surface.subject);
-
-    // The reply lands in Sent as its own message, so the mailbox stays
-    // coherent afterwards.
-    S.mail.push({
-      id: 'm-sent-' + Date.now(),
-      arrival: 'sent', folder: 'sent', delivered: true, unread: false,
-      read: true, reported: false, repliedAt: null,
-      received: nowLabel(), order: 300 + S.mail.length,
-      surface: {
-        subject: 'Re: ' + message.surface.subject,
-        from_name: WORLD.learner.name,
-        from_address: WORLD.learner.email,
-        reply_to: null,
-        to: message.surface.from_address,
-        body: [text || '(no text)'],
-        links: [], attachments: []
-      },
-      analysis: { disposition: 'legitimate', family: null, why: '' }
-    });
-
-    var decisionId = REPLY_DECISION[messageId];
-    if (decisionId) {
-      decide(decisionId, {
-        where: 'Mail',
-        evidence: relevantEvidenceFor(messageId)
-      });
-    } else {
-      render();
-    }
-  }
-
-  function verifyThroughMessages(conversationId) {
-    var conversation = null;
-    S.conversations.forEach(function (entry) {
-      if (entry.id === conversationId) { conversation = entry; }
-    });
-    if (!conversation || !conversation.verification_reply) { return; }
-
-    var script = conversation.verification_reply;
-    appendMessage(conversationId, WORLD.learner.name, script.sent);
-    observe('verify_message:' + conversationId,
-            'Asked ' + conversation.name + ' on a known channel');
-
-    var handle = setTimeout(function () {
-      appendMessage(conversationId, script.reply.from, script.reply.text);
-      pushNotification({
-        kind: 'message', title: script.reply.from,
-        body: script.reply.text.slice(0, 72) + '…',
-        opens: { app: 'messages', conversation_id: conversationId }
-      });
-      render();
-    }, S.fast ? 700 : 3200);
-    timers.push(handle);
-
-    if (conversationId === 'conv-arjun-rao' && isLive('m-invoice-amend')) {
-      decide('d-bec-verify', { where: 'Messages',
-                               evidence: relevantEvidenceFor('m-invoice-amend') });
-    } else if (conversationId === 'conv-priya-menon' && isLive('m-payroll-restructure')) {
-      decide('d-phish-verify', { where: 'Messages',
-                                 evidence: relevantEvidenceFor('m-payroll-restructure') });
-    } else {
-      render();
-    }
-  }
-
-  function callContact(contactId) {
-    var contact = null;
-    WORLD.directory.forEach(function (entry) {
-      if (entry.id === contactId) { contact = entry; }
-    });
-    if (!contact || !contact.callback) { return; }
-
-    APP.directory.call = { id: contactId, text: contact.callback };
-    observe('call_contact:' + contactId, 'Called ' + contact.name + ' on the '
-            + 'number held in the Directory');
-    record('action', 'Called ' + contact.name, contact.extension);
-
-    if (contactId === 'dir-calderwood' && isLive('m-invoice-amend')) {
-      decide('d-bec-verify', { where: 'Directory',
-                               evidence: relevantEvidenceFor('m-invoice-amend') });
-    } else if (contactId === 'dir-priya-menon' && isLive('m-payroll-restructure')) {
-      decide('d-phish-verify', { where: 'Directory',
-                                 evidence: relevantEvidenceFor('m-payroll-restructure') });
-    } else {
-      render();
-    }
-  }
-
-  /* "Live" = delivered and not already reported or deleted. Used so a
-   * verification action only counts as verification of something that is
-   * actually in front of the learner. */
-  function isLive(messageId) {
-    var message = findMail(messageId);
-    return !!(message && message.delivered && !message.reported
-      && message.folder !== 'deleted');
-  }
-
-  function alreadyDecided(decisionId) {
-    return S.decisions.some(function (entry) { return entry.id === decisionId; });
-  }
-
-  function resolvePrompt(uid, approved) {
-    var prompt = null;
-    S.prompts.forEach(function (entry) { if (entry.uid === uid) { prompt = entry; } });
-    if (!prompt || prompt.status !== 'pending') { return; }
-
-    prompt.status = approved ? 'approved' : 'denied';
-    markResolved(prompt.id);
-    record('action', (approved ? 'Approved' : 'Denied') + ' the request for '
-           + prompt.surface.app, prompt.surface.location);
-
-    var hostile = prompt.analysis && prompt.analysis.disposition === 'hostile';
-    var evidence = (prompt.analysis && prompt.analysis.evidence) || [];
-
-    if (hostile) {
-      decide(approved ? 'd-mfa-approve-hostile' : 'd-mfa-deny-hostile',
-             { where: 'Authenticator', evidence: evidence });
-    } else {
-      // The legitimate prompt belongs to the learner's own remote-access
-      // sign-in, so resolving it settles the browser page too.
-      APP.browser.tabs.forEach(function (tab) {
-        if (tab.signedIn['access.northbridge.example'] === 'pending') {
-          tab.signedIn['access.northbridge.example'] = approved ? 'done' : 'denied';
-        }
-      });
-      // Your own approvals belong in your own history. The hostile paths get
-      // their activity row from their authored chain; this one has no chain,
-      // so it records itself.
-      S.authHistory.unshift({
-        id: 'auth-' + prompt.uid,
-        app: prompt.surface.app,
-        result: approved ? 'Approved by you' : 'Denied by you',
-        device: prompt.surface.device,
-        location: prompt.surface.location,
-        when: nowLabel()
-      });
-      S.vpnConnected = approved;
-      if (approved && S.tasks['task-remote-access']) {
-        S.tasks['task-remote-access'].state = 'done';
-        S.tasks['task-remote-access'].note = 'Remote access session started.';
-      }
-      decide(approved ? 'd-mfa-approve-legit' : 'd-mfa-deny-legit',
-             { where: 'Authenticator', evidence: evidence });
-    }
-  }
-
-  function releasePayment() {
-    var tab = ensureTab();
-    var page = WORLD.browser.pages[tab.url];
-    if (!page || !page.invoice) { return; }
-
+  function releasePayment(url) {
     var field = qs('#pw-pay-account');
-    var value = field ? field.value.trim() : page.invoice.account_of_record;
-    var changed = value !== page.invoice.account_of_record;
-
-    confirmDialog('Release ' + page.invoice.amount + ' for '
-      + page.invoice.reference + '?',
+    var page = pageFor(url) || {};
+    var invoice = page.invoice || {};
+    var value = field ? field.value.trim() : (invoice.account_of_record || '');
+    var changed = value !== (invoice.account_of_record || '');
+    confirmDialog('Release ' + invoice.amount + ' for ' + invoice.reference + '?',
       changed
         ? 'The settlement account has been changed from the one held on file.'
         : 'The payment goes to the account of record.',
       function () {
-        tab.signedIn['payments-released'] = value;
-        record('action', 'Released ' + page.invoice.reference,
-               'Supplier payments');
-        if (changed) {
-          decide('d-bec-authorize', {
-            where: 'Browser → Supplier payments',
-            evidence: relevantEvidenceFor('m-invoice-amend')
-          });
-        } else {
-          pushNotification({
-            kind: 'system', title: 'Payment released',
-            body: page.invoice.reference + ' · account of record',
-            opens: null
-          });
-          render();
-        }
+        send('browser.release_payment', null, { url: url, account: value });
       });
   }
 
-  function supportAction(action) {
-    if (action === 'isolate') {
-      S.networkDisconnected = true;
-      if (S.incidents['inc-files']) { S.incidents['inc-files'].contained = true; }
-      record('action', 'Disconnected the workstation from the network',
-             'Service Desk');
-      if (S.incidents['inc-files'] && !alreadyDecided('d-ransom-isolate')) {
-        decide('d-ransom-isolate', { where: 'Browser → Service Desk' });
-      } else {
-        pushNotification({
-          kind: 'system', title: 'Network disconnected',
-          body: 'This workstation is off the network.', opens: null
-        });
-        render();
-      }
-      return;
-    }
-
-    record('action', 'Raised an incident with the Service Desk', 'Service Desk');
-    pushNotification({
-      kind: 'system', title: 'Incident raised',
-      body: 'The Service Desk has your case reference.', opens: null
-    });
-    appendMessage('conv-lena-fischer', 'Lena Fischer',
-                  'Thanks — I can see your ticket. Someone is picking it up now.');
-    render();
-  }
-
-  // =========================================================================
-  // Sign-in submission
-  //
-  // The password field is never read. Nothing is serialised and no request is
-  // made. The field is cleared on submit so the typed value does not survive
-  // even in the DOM.
-  // =========================================================================
-
+  /* The password field is never read, never serialised and never sent. What is
+   * submitted is the address of the page; the server decides what signing in
+   * there means. The field is cleared so the typed value does not survive even
+   * in the DOM. */
   function handleSubmit(event) {
     var form = event.target;
     if (!form.hasAttribute || !form.hasAttribute('data-signin')) { return; }
     event.preventDefault();
-
-    var kind = form.getAttribute('data-signin');
-    var tab = ensureTab();
     var passwordField = qs('#pw-signin-pass', form);
     if (passwordField) { passwordField.value = ''; }
-
-    if (kind === 'vpn-legit') {
-      tab.signedIn[tab.url] = 'pending';
-      record('action', 'Started a remote access sign-in', tab.url);
-      addPrompt('mfa-vpn');
-      if (S.tasks['task-remote-access']) {
-        S.tasks['task-remote-access'].state = 'outstanding';
-        S.tasks['task-remote-access'].note = 'Remote access waiting for approval.';
-      }
-      render();
-      return;
-    }
-
-    if (kind === 'payroll-legit') {
-      tab.signedIn[tab.url] = 'done';
-      record('action', 'Signed in to the payroll portal', tab.url);
-      render();
-      return;
-    }
-
-    // The hostile destination. What is recorded is the decision, not a value.
-    tab.signedIn[tab.url] = 'submitted';
-    record('action', 'Signed in on ' + tab.url, 'Browser');
-    decide('d-phish-credentials', {
-      where: 'Browser → ' + tab.url,
-      evidence: relevantEvidenceFor('m-payroll-restructure')
-    });
+    send('browser.sign_in', null, { url: form.getAttribute('data-signin') });
   }
 
   // =========================================================================
@@ -2877,176 +2109,93 @@
   // =========================================================================
 
   function outstandingSummary() {
-    var outstanding = Object.keys(S.tasks).map(function (id) { return S.tasks[id]; })
-      .filter(function (task) { return task.state === 'outstanding'; });
+    if (!SNAP) { return 'Nothing is outstanding.'; }
+    var outstanding = SNAP.tasks.filter(function (task) {
+      return task.state === 'outstanding';
+    });
     if (!outstanding.length) { return 'Nothing is outstanding.'; }
     return outstanding.length + ' item'
       + (outstanding.length === 1 ? ' is' : 's are') + ' still outstanding: '
       + outstanding.map(function (task) { return task.label; }).join('; ') + '.';
   }
 
+  /* Ending the attempt is a server operation. It persists the lifecycle,
+   * closes the session to further consequential actions and preserves every
+   * fact for the debrief — it resets nothing. The debrief that follows is
+   * derived from the persisted session, not from anything this file kept. */
   function endSession() {
-    S.ended = true;
-    timers.forEach(function (handle) { clearTimeout(handle); });
-    timers = [];
-    if (deliveryTimer) { clearTimeout(deliveryTimer); }
+    ended = true;
+    stopStream();
+    if (tickTimer) { window.clearInterval(tickTimer); }
+    request('/prototype/api/session/end', { method: 'POST', body: {} })
+      .then(function () { return request('/prototype/api/session/debrief'); })
+      .then(function (payload) {
+        try {
+          window.sessionStorage.setItem('rewindsec.prototype.run',
+                                        JSON.stringify(payload.debrief));
+        } catch (err) { /* private mode: the debrief falls back to its example */ }
+      })
+      .catch(function () { /* the results page falls back to its example */ })
+      .then(function () { window.location.href = '/prototype/results'; });
+  }
 
-    var payload = {
-      focus: S.focus,
-      mode: S.mode,
-      assessmentId: S.assessmentId,
-      endedAt: nowLabel(),
-      durationMinutes: simMinutes() - CLOCK_START_MIN,
-      timeline: S.timeline,
-      decisions: S.decisions,
-      chains: S.chains,
-      incidents: S.incidents,
-      tasks: S.tasks,
-      observed: Object.keys(S.observed),
-      hostileDelivered: S.mail.filter(function (m) {
-        return m.delivered && m.analysis && m.analysis.disposition === 'hostile';
-      }).map(function (m) { return m.id; }),
-      hostilePrompts: S.prompts.filter(function (p) {
-        return p.analysis && p.analysis.disposition === 'hostile';
-      }).length,
-      deletedHostile: S.deletedHostile,
-      filesImpacted: S.files.reduce(function (total, location) {
-        return total + location.files.filter(function (f) {
-          return f.state === 'unavailable';
-        }).length;
-      }, 0),
-      evidenceUniverse: buildEvidenceUniverse()
-    };
+  // =========================================================================
+  // Live updates
+  // =========================================================================
+  //
+  // The stream carries revision numbers, not content. When the revision moves
+  // we re-read the authoritative snapshot through the ordinary path, so there
+  // is exactly one way state reaches this client and exactly one thing to keep
+  // safe. Losing the connection changes nothing: EventSource reconnects on its
+  // own, and the tick below keeps the world moving regardless.
 
+  function startStream() {
+    if (!window.EventSource) { return; }
     try {
-      window.sessionStorage.setItem('rewindsec.prototype.run',
-                                    JSON.stringify(payload));
-    } catch (err) { /* private mode: the debrief falls back to its fixture */ }
-
-    window.location.href = '/prototype/results';
+      stream = new window.EventSource('/prototype/api/events');
+    } catch (err) {
+      stream = null;
+      return;
+    }
+    stream.addEventListener('revision', function (event) {
+      var revision = null;
+      try { revision = JSON.parse(event.data).revision; }
+      catch (err) { return; }
+      if (SNAP && revision > SNAP.session.revision) { refresh().catch(function () {}); }
+    });
+    stream.onerror = function () {
+      // EventSource reconnects by itself and replays Last-Event-ID. Nothing to
+      // do here, and nothing about the simulation has changed.
+    };
   }
 
-  /* Every piece of decision-relevant evidence that the workplace actually
-   * made available during this run, with whether it was inspected. This is
-   * the available-versus-observed distinction, reduced to what the debrief
-   * needs. */
-  function buildEvidenceUniverse() {
-    var out = [];
-    var seen = {};
-
-    function add(item) {
-      if (seen[item.id]) { return; }
-      seen[item.id] = true;
-      out.push({
-        id: item.id, label: item.label, where: item.where,
-        observed: !!S.observed[item.action]
-      });
-    }
-
-    S.mail.forEach(function (message) {
-      if (!message.delivered) { return; }
-      if (message.analysis && message.analysis.evidence) {
-        message.analysis.evidence.forEach(add);
-      }
-    });
-    S.prompts.forEach(function (prompt) {
-      if (prompt.analysis && prompt.analysis.evidence) {
-        prompt.analysis.evidence.forEach(add);
-      }
-    });
-    return out;
+  function stopStream() {
+    if (stream) { stream.close(); stream = null; }
   }
 
-  // =========================================================================
-  // Prototype developer panel wiring
-  // =========================================================================
+  /* Asks the server to let simulation time move on by one step. The browser
+   * decides only *whether* to ask; the size of a step is an authored constant
+   * on the server, and no elapsed real time is measured anywhere. A slow
+   * machine, a throttled background tab and a fast one all buy exactly the
+   * same amount of simulation time per request. If this never fires — a
+   * suspended tab, a closed laptop — nothing is lost and nothing is skipped;
+   * the schedule simply waits. This timer does not own consequence timing. */
+  function startTicking() {
+    tickTimer = window.setInterval(function () {
+      if (ended || !SNAP || !SNAP.session.active) { return; }
+      if (document.hidden) { return; }
+      request('/prototype/api/session/tick', { method: 'POST', body: {} })
+        .then(adopt)
+        .catch(function () { /* transient; the next tick tries again */ });
+    }, 4000);
 
-  function bindDevPanel() {
-    var focusSelect = qs('#pw-dev-focus');
-    var modeSelect = qs('#pw-dev-mode');
-    if (focusSelect) { focusSelect.value = S.focus; }
-    if (modeSelect) { modeSelect.value = S.mode; }
-
-    var restart = qs('#pw-dev-restart');
-    if (restart) {
-      restart.addEventListener('click', function () {
-        window.location.href = '/prototype/workstation?focus='
-          + encodeURIComponent(focusSelect.value)
-          + '&mode=' + encodeURIComponent(modeSelect.value);
-      });
-    }
-
-    var reset = qs('#pw-dev-reset');
-    if (reset) {
-      reset.addEventListener('click', function () {
-        try { window.sessionStorage.removeItem('rewindsec.prototype.run'); }
-        catch (err) { /* nothing to clear */ }
-        window.location.href = '/prototype/workstation?focus=' + S.focus
-          + '&mode=' + S.mode;
-      });
-    }
-
-    var next = qs('#pw-dev-next');
-    if (next) { next.addEventListener('click', function () { deliverNext(); }); }
-
-    var all = qs('#pw-dev-all');
-    if (all) {
-      all.addEventListener('click', function () {
-        while (S.queueIndex < S.queue.length) { deliverNext(); }
-      });
-    }
-
-    var fast = qs('#pw-dev-fast');
-    if (fast) {
-      fast.checked = S.fast;
-      fast.addEventListener('change', function () { S.fast = fast.checked; });
-    }
-
-    qsa('[data-dev-inject]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        var kind = button.getAttribute('data-dev-inject');
-        if (kind === 'notification') {
-          pushNotification({
-            kind: 'system', title: 'Backup completed',
-            body: 'Documents and Desktop backed up.', opens: null
-          });
-        } else if (kind === 'mfa') {
-          addPrompt('mfa-unexpected');
-        } else if (kind === 'legit-mfa') {
-          addPrompt('mfa-vpn');
-        } else if (kind === 'message') {
-          appendMessage('conv-tom-brennan', 'Tom Brennan',
-                        'Are you around for ten minutes before the stand-up?');
-          pushNotification({
-            kind: 'message', title: 'Tom Brennan',
-            body: 'Are you around for ten minutes before the stand-up?',
-            opens: { app: 'messages', conversation_id: 'conv-tom-brennan' }
-          });
-        }
-        render();
-      });
-    });
-
-    qsa('[data-dev-chain]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        var decisionId = button.getAttribute('data-dev-chain');
-        var evidenceSource = {
-          'd-phish-credentials': 'm-payroll-restructure',
-          'd-ransom-open': 'm-rate-card',
-          'd-bec-authorize': 'm-invoice-amend'
-        }[decisionId];
-        if (evidenceSource) { deliverMail(evidenceSource, null, true); }
-        if (decisionId === 'd-mfa-approve-hostile') { addPrompt('mfa-unexpected'); }
-        decide(decisionId, {
-          where: 'Prototype tooling',
-          evidence: evidenceSource ? relevantEvidenceFor(evidenceSource) : []
-        });
-      });
-    });
+    window.setInterval(function () {
+      if (SNAP) { qs('#pw-clock').textContent = nowLabel(); }
+    }, 2000);
   }
 
   // =========================================================================
-  // Boot
+  // Shell wiring
   // =========================================================================
 
   function bindShell() {
@@ -3060,16 +2209,9 @@
       else if (node.id === 'pw-url-input') { ensureTab().urlDraft = node.value; }
       else if (node.id === 'pw-dir-search') { APP.directory.search = node.value; render(); }
       else if (node.id === 'pw-msg-input') { APP.messages.draft = node.value; }
+      else if (node.id === 'pw-pay-account') { APP.browser.accountDraft = node.value; }
       else if (node.id === 'pw-note-title' || node.id === 'pw-note-body') {
-        S.notes.forEach(function (note) {
-          if (note.id === APP.notes.selected) {
-            if (node.id === 'pw-note-title') { note.title = node.value; }
-            else { note.body = node.value; }
-            note.updated = nowLabel();
-          }
-        });
-      } else if (node.id === 'pw-pay-account') {
-        ensureTab().accountOverride = node.value;
+        queueNoteSave();
       }
     });
 
@@ -3080,19 +2222,16 @@
         browserNavigate(event.target.value);
       } else if (event.target.id === 'pw-msg-input') {
         event.preventDefault();
-        var current = APP.messages.conversation;
         var text = event.target.value.trim();
         if (text) {
-          appendMessage(current, WORLD.learner.name, text);
           APP.messages.draft = '';
-          record('action', 'Sent a message', current);
-          render();
+          send('messages.send', APP.messages.conversation, { text: text });
         }
       }
     });
 
-    // Escape closes non-blocking surfaces only. The comparison screen owns
-    // its own key handling and deliberately does not close on Escape.
+    // Escape closes non-blocking surfaces only. The comparison screen owns its
+    // own key handling and deliberately does not close on Escape.
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') { return; }
       if (!qs('#pw-confirm-scrim').hidden) { closeConfirm(); return; }
@@ -3107,8 +2246,7 @@
       toggleNotifications(false);
     });
     qs('#pw-notif-clear').addEventListener('click', function () {
-      S.notifications.forEach(function (entry) { entry.unread = false; });
-      render();
+      send('notifications.mark_read');
     });
 
     qs('#pw-end-btn').addEventListener('click', function () {
@@ -3126,11 +2264,22 @@
       if (callback) { callback(); }
     });
 
-    // A window keeps the geometry it was given until something changes it,
-    // so shrinking the viewport used to leave one hanging off the right edge
-    // of the desk. Clamp every open window back inside the work area first,
-    // then draw.
     window.addEventListener('resize', function () { reflowWindows(); render(); });
+    window.addEventListener('beforeunload', stopStream);
+  }
+
+  /* Notes save on a short debounce rather than on every keystroke: one POST
+   * per keypress would be a write amplifier for no benefit, and the note is
+   * the learner's own working document, not a stream of events. */
+  function queueNoteSave() {
+    if (noteSaveTimer) { window.clearTimeout(noteSaveTimer); }
+    noteSaveTimer = window.setTimeout(function () {
+      var titleField = qs('#pw-note-title');
+      var bodyField = qs('#pw-note-body');
+      if (!APP.notes.selected || !titleField || !bodyField) { return; }
+      send('notes.save', APP.notes.selected,
+           { title: titleField.value, body: bodyField.value });
+    }, 700);
   }
 
   function closeEndDialog() {
@@ -3142,51 +2291,117 @@
     qs('#pw-notifpanel').hidden = !open;
     qs('#pw-notif-btn').setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open) {
-      S.notifications.forEach(function (entry) { entry.unread = false; });
-      render();
+      send('notifications.mark_read');
       qs('#pw-notif-close').focus();
     } else {
       renderTopBar();
     }
   }
 
-  function boot(world) {
-    WORLD = world;
+  // =========================================================================
+  // Boot
+  // =========================================================================
+  //
+  // Resume first, start second, and never the other way round. Loading this
+  // page is a read: it finds the session that is already there and rebuilds
+  // the workstation from the server's persisted world. Only when there is no
+  // live session at all does the entry screen's focus and mode create one,
+  // and that creation is an explicit POST.
+  //
+  // The query string is not authority over a session that exists. A stale
+  // link, a bookmark or a second tab carrying ?focus=…&mode=… different from
+  // the running attempt does not end it, replace it or change it — the server
+  // would refuse anyway. The mismatch is reconciled in the address bar, which
+  // is presentation, and nowhere else.
 
-    var focus = param('focus') || 'mixed';
-    if (!WORLD.timelines[focus]) { focus = 'mixed'; }
-    var mode = param('mode') || 'simulation';
-    if (!modeFlags(mode)) { mode = 'simulation'; }
-
-    S = buildState(focus, mode, param('assessment'));
+  function boot() {
     APP = defaultAppState();
-
-    record('event', 'Session started',
-           modeLabel(mode) + ' · ' + focus + ' focus');
-
     bindShell();
-    bindDevPanel();
-    openApp('mail');
-    render();
 
-    setInterval(function () {
-      if (!S.ended) { renderTopBar(); }
-    }, 5000);
+    // The server told the shell whether this browser already has a session.
+    // A hint, not a fact: if it is wrong, both paths below recover. What it
+    // buys is not asking a question whose answer is a 404 every single time
+    // somebody starts training.
+    var shell = qs('#pw-ws');
+    if (shell && shell.getAttribute('data-has-session') === '0') {
+      startNew().then(ready).catch(fail);
+      return;
+    }
 
-    scheduleNextDelivery(S.mode === 'assessment' ? 6000 : 14000);
+    refresh()
+      .then(function () {
+        if (!SNAP.session.active) { return startNew(); }
+        reconcileUrl();
+        return null;
+      })
+      .catch(function (error) {
+        if (error && error.status === 404) { return startNew(); }
+        throw error;
+      })
+      .then(ready)
+      .catch(fail);
   }
 
-  fetch('/prototype/api/world', { headers: { Accept: 'application/json' } })
-    .then(function (response) { return response.json(); })
-    .then(boot)
-    .catch(function (error) {
-      var area = qs('#pw-workarea');
-      if (area) {
-        area.innerHTML = '<div class="pw-empty" style="padding-top:4rem">'
-          + '<h3>The workstation could not load its world</h3>'
-          + '<p>The fixture endpoint /prototype/api/world did not respond.</p>'
-          + '</div>';
+  /* Makes the address bar agree with the session that is actually running.
+   * Cosmetic and deliberately so: it rewrites history, never state. Nothing
+   * here posts, and the factual session is untouched whatever the URL said. */
+  function reconcileUrl() {
+    if (!window.history || !window.history.replaceState) { return; }
+    var wantedFocus = param('focus');
+    var wantedMode = param('mode');
+    if (!wantedFocus && !wantedMode) { return; }
+    if (wantedFocus === SNAP.session.focus && wantedMode === SNAP.session.mode) {
+      return;
+    }
+    try {
+      window.history.replaceState(null, '', window.location.pathname
+        + '?focus=' + encodeURIComponent(SNAP.session.focus)
+        + '&mode=' + encodeURIComponent(SNAP.session.mode));
+    } catch (err) { /* history is unavailable; the URL is only decoration */ }
+  }
+
+  function startNew() {
+    return request('/prototype/api/session/start', {
+      method: 'POST',
+      body: { focus: param('focus') || 'mixed', mode: param('mode') || 'simulation' }
+    }).then(adopt).catch(function (error) {
+      // 409 means this browser turned out to have a live session after all —
+      // a duplicated boot, or a stale "no session" hint. Read it; never
+      // replace it.
+      if (error && error.status === 409) {
+        return refresh().then(reconcileUrl);
       }
-      if (window.console) { window.console.error(error); }
+      throw error;
     });
+  }
+
+  function ready() {
+    if (!SNAP) { throw new Error('no snapshot'); }
+    syncClock();
+    render();
+    openApp('mail');
+    startStream();
+    startTicking();
+    if (window.RewindSecDevPanel) {
+      window.RewindSecDevPanel.attach({
+        snapshot: function () { return SNAP; },
+        request: request,
+        adopt: adopt,
+        refresh: refresh
+      });
+    }
+  }
+
+  function fail(error) {
+    var area = qs('#pw-workarea');
+    if (area) {
+      area.innerHTML = '<div class="pw-empty" style="padding-top:4rem">'
+        + '<h3>The workstation could not start</h3>'
+        + '<p>The server did not return a session. Reload the page to try '
+        + 'again.</p></div>';
+    }
+    if (window.console) { window.console.error(error); }
+  }
+
+  boot();
 }());

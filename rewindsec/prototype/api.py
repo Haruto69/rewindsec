@@ -1,0 +1,381 @@
+"""The HTTP adapter for the learner workstation.
+
+This module is the *only* place in the RewindSec 2.0 stack that knows what a
+request, a status code or an SSE frame is. It translates:
+
+    HTTP request  ->  a validated semantic action
+    WorkstationError  ->  a status code and a stable JSON error body
+    a learner-safe projection  ->  a JSON response
+
+and it does nothing else. It holds no simulation state, applies no rule and
+computes no consequence; every decision belongs to
+:mod:`rewindsec.workstation.service`, which has never heard of Flask.
+
+Session identity
+----------------
+The active session id lives in the **signed Flask session cookie** and nowhere
+else. It is never accepted from a request body, a query string, a header or a
+path segment. A client can therefore only ever address the session the server
+already believes it is in, which is what makes cross-session access a
+non-question rather than a check that has to be remembered: there is no
+parameter to tamper with.
+
+The learner reference is a per-browser-session opaque token, also minted
+server-side. It is deliberately not the v1 study identity, not an email
+address and not a database row id -- Batch 5 owns real student records, and
+coupling the two now would make a 2.0 session indistinguishable from a v1 one.
+
+CSRF
+----
+Nothing here relaxes the application's global CSRF gate. Every state-changing
+route is a POST, and the gate in ``security.init_csrf`` applies to it exactly
+as it applies to every other unsafe request in the application. The front end
+reads the token from a meta tag the server rendered and sends it in the
+``X-CSRF-Token`` header.
+"""
+
+import json
+
+from flask import Response, jsonify, request, session, stream_with_context
+
+from rewindsec.workstation import debrief as debrief_module
+from rewindsec.workstation.actions import MAX_BODY_BYTES, parse_action_request
+from rewindsec.workstation.errors import (InternalWorkstationError,
+                                          InvalidRequestError,
+                                          NoActiveSessionError,
+                                          SessionAlreadyActiveError,
+                                          WorkstationError)
+from rewindsec.workstation.content import index as ix
+
+__all__ = ["register_workstation_api", "SESSION_KEY", "LEARNER_KEY",
+           "SSE_KEEPALIVE_SECONDS", "SSE_MAX_SECONDS"]
+
+#: Signed-cookie keys. Namespaced so they cannot collide with the v1 session
+#: values that share the same cookie.
+SESSION_KEY = "rewindsec2_session"
+LEARNER_KEY = "rewindsec2_learner"
+
+#: How long a stream waits for a revision change before writing a keepalive
+#: comment. A comment carries no event and no revision, and writing one
+#: changes nothing about the simulation.
+SSE_KEEPALIVE_SECONDS = 15
+
+#: How long one stream connection lives before politely ending so the client
+#: reconnects. Bounded so a forgotten tab cannot hold a worker forever, and so
+#: a test can never hang.
+SSE_MAX_SECONDS = 300
+
+
+def register_workstation_api(bp, service_factory, updates):
+    """Attach the learner API to the prototype blueprint.
+
+    ``service_factory`` is a zero-argument callable returning the configured
+    :class:`~rewindsec.workstation.service.WorkstationService`. A callable
+    rather than an instance so the blueprint never has to be constructed after
+    the database, and so a test can swap the whole service out.
+    """
+
+    # -- helpers ----------------------------------------------------------
+
+    def learner_ref():
+        """This browser's opaque learner reference, minted on first use."""
+        ref = session.get(LEARNER_KEY)
+        if not ref:
+            import secrets
+            ref = "learner-%s" % secrets.token_hex(8)
+            session[LEARNER_KEY] = ref
+            session.modified = True
+        return ref
+
+    def active_session_id():
+        return session.get(SESSION_KEY)
+
+    def body():
+        """The decoded JSON body, size-checked before it is parsed.
+
+        ``request.get_json`` would happily decode a very large document
+        first and complain afterwards, so the length is checked at the door.
+        """
+        length = request.content_length
+        if length is not None and length > MAX_BODY_BYTES:
+            raise InvalidRequestError("That request is too large.")
+        raw = request.get_data(cache=False, as_text=True)
+        if len(raw.encode("utf-8")) > MAX_BODY_BYTES:
+            raise InvalidRequestError("That request is too large.")
+        if not raw.strip():
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise InvalidRequestError("That request was not valid JSON.")
+
+    def error_response(exc):
+        """One stable error shape. No stack trace, no SQL, no scenario truth."""
+        payload = {"error": {"code": exc.code, "message": exc.message}}
+        if exc.detail:
+            payload["error"]["detail"] = exc.detail
+        return jsonify(payload), exc.status
+
+    @bp.errorhandler(WorkstationError)
+    def _workstation_error(exc):
+        return error_response(exc)
+
+    def ok(payload, status=200):
+        return jsonify(payload), status
+
+    # -- session lifecycle ------------------------------------------------
+
+    def read_focus_and_mode():
+        """The only two things about a session a client may choose."""
+        payload = body()
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("The request body must be a JSON object.")
+        unknown = sorted(set(payload) - {"focus", "mode", "csrf_token"})
+        if unknown:
+            raise InvalidRequestError(
+                "Unrecognised field(s): %s." % ", ".join(unknown))
+        focus = payload.get("focus", "mixed")
+        mode = payload.get("mode", "simulation")
+        if focus not in ix.FOCUS_IDS:
+            raise InvalidRequestError("That focus is not one of the options.")
+        if mode not in ix.MODE_IDS:
+            raise InvalidRequestError("That mode is not one of the options.")
+        return focus, mode
+
+    def live_session(service):
+        """The caller's session if it exists and is still active, else None."""
+        session_id = active_session_id()
+        if not session_id:
+            return None
+        try:
+            simulation = service.require_owned(session_id, learner_ref())
+        except NoActiveSessionError:
+            return None
+        return simulation if simulation.is_active else None
+
+    def create(service, focus, mode):
+        session_id = service.start_session(learner_ref(), focus, mode)
+        session[SESSION_KEY] = session_id
+        session.modified = True
+        return ok({"snapshot": service.snapshot(session_id, learner_ref())}, 201)
+
+    @bp.route("/api/session/start", methods=["POST"])
+    def api_session_start():
+        """Create a server-side session and remember it in the signed cookie.
+
+        The focus and the mode are the learner's own choices and are the only
+        things a client may supply. The session id, the root seed, the clock
+        and every id inside the session are minted here.
+
+        Refused with 409 if this browser already has an *active* session. A
+        session is a factual record -- a world, a ledger, an action log -- and
+        it is not something a repeated request, a bookmarked link or a page
+        that booted twice gets to throw away. Replacing one on purpose is what
+        ``/api/session/new`` is for, and it ends the current attempt on the
+        record first.
+        """
+        focus, mode = read_focus_and_mode()
+        service = service_factory()
+        if live_session(service) is not None:
+            raise SessionAlreadyActiveError(
+                "You already have a training session open.")
+        return create(service, focus, mode)
+
+    @bp.route("/api/session/new", methods=["POST"])
+    def api_session_new():
+        """Deliberately end the current attempt and begin a fresh one.
+
+        The one operation allowed to replace a live session, and it is a POST
+        carrying an explicit intent -- never a page render, never a query
+        parameter. The outgoing session is *completed*, not deleted: its
+        record stays in the database and stays readable.
+        """
+        focus, mode = read_focus_and_mode()
+        service = service_factory()
+        current = live_session(service)
+        if current is not None:
+            service.end_session(current.session_id, learner_ref())
+        return create(service, focus, mode)
+
+    @bp.route("/api/session", methods=["GET"])
+    def api_session():
+        """The authoritative snapshot. Reads only; mutates nothing."""
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        return ok({"snapshot": service.snapshot(session_id, learner_ref())})
+
+    @bp.route("/api/session/tick", methods=["POST"])
+    def api_session_tick():
+        """Let simulation time move on and apply whatever became due.
+
+        A POST because it changes state. The client decides only *whether*
+        to ask; how far the clock moves is an authored constant on the server,
+        and no real elapsed time is measured anywhere. A slow machine, a
+        throttled tab and a fast one all buy exactly the same step. If the
+        client never asks, nothing is lost and nothing is skipped: the
+        schedule simply waits for the next explicit advance.
+        """
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        body()  # size- and syntax-checked even though nothing is read from it
+        return ok({"snapshot": service.tick(session_id, learner_ref())})
+
+    @bp.route("/api/session/end", methods=["POST"])
+    def api_session_end():
+        """End the attempt. Preserves every fact; resets nothing."""
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        body()
+        snapshot = service.end_session(session_id, learner_ref())
+        return ok({"snapshot": snapshot})
+
+    @bp.route("/api/session/debrief", methods=["GET"])
+    def api_session_debrief():
+        """The factual debrief. Available only once the session has finished."""
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        simulation = service.require_owned(session_id, learner_ref())
+        return ok({"debrief": debrief_module.debrief_document(simulation)})
+
+    # -- actions -----------------------------------------------------------
+
+    @bp.route("/api/actions", methods=["POST"])
+    def api_actions():
+        """Apply one semantic learner action.
+
+        The body names an allowlisted verb, a target and narrow parameters,
+        and nothing else. It cannot carry a world, a mutation, an event id, a
+        simulation time, a sequence number, a seed or a score: every one of
+        those is rejected as an unrecognised field before the session is even
+        loaded.
+        """
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        action = parse_action_request(body())
+        result = service.apply_action(session_id, action, learner_ref())
+        response = {"snapshot": result.snapshot}
+        if result.notice:
+            response["notice"] = result.notice
+        return ok(response)
+
+    # -- server-sent events -------------------------------------------------
+
+    @bp.route("/api/events", methods=["GET"])
+    def api_events():
+        """Revision updates for the caller's own session, over SSE.
+
+        The stream carries revision numbers, never content: a woken client
+        re-fetches the snapshot through the ordinary read path, so this
+        transport can never become a second, differently-filtered way for
+        state to reach a browser.
+
+        It is scoped to the session in the signed cookie -- there is no
+        session parameter to supply, and therefore no way to subscribe to
+        somebody else's session. Opening, waiting, timing out and reconnecting
+        change no simulation state, and neither does a keepalive.
+        """
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        # Establishes that the session exists and belongs to this browser
+        # before a long-lived response is opened.
+        current = service.revision(session_id, learner_ref())
+        since = _last_event_id()
+        updates.publish(session_id, current)
+
+        @stream_with_context
+        def stream():
+            # The first frame always states the current revision, so a client
+            # that reconnected after missing an update reconciles immediately
+            # rather than waiting for the next change.
+            yield _frame(current, "revision", {"revision": current})
+            seen = current if since is None or since < current else since
+            waited = 0
+            while waited < SSE_MAX_SECONDS:
+                revision = updates.wait_for_change(
+                    session_id, seen, SSE_KEEPALIVE_SECONDS)
+                if revision is None:
+                    waited += SSE_KEEPALIVE_SECONDS
+                    # A comment. No event, no id, no revision, no state change.
+                    yield ": keepalive\n\n"
+                    continue
+                seen = revision
+                yield _frame(revision, "revision", {"revision": revision})
+
+        response = Response(stream(), mimetype="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache, no-store"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Connection"] = "keep-alive"
+        return response
+
+    # -- development-only operations ---------------------------------------
+    #
+    # Prototype tooling. Every one of these goes through the same service, the
+    # same persistence and the same projection a learner action does: they
+    # compress waiting, never causality, and none of them can produce a state
+    # a learner action could not have produced. They are POSTs under an
+    # explicit ``/api/dev/`` prefix so that no learner route can grow into one
+    # by accident.
+
+    @bp.route("/api/dev/advance", methods=["POST"])
+    def api_dev_advance():
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        payload = body()
+        if not isinstance(payload, dict):
+            raise InvalidRequestError("The request body must be a JSON object.")
+        unknown = sorted(set(payload) - {"milliseconds", "csrf_token"})
+        if unknown:
+            raise InvalidRequestError(
+                "Unrecognised field(s): %s." % ", ".join(unknown))
+        milliseconds = payload.get("milliseconds", 10000)
+        if isinstance(milliseconds, bool) or not isinstance(milliseconds, int):
+            raise InvalidRequestError("milliseconds must be a whole number.")
+        return ok({"snapshot": service.dev_advance(
+            session_id, milliseconds, learner_ref())})
+
+    @bp.route("/api/dev/deliver-next", methods=["POST"])
+    def api_dev_deliver_next():
+        service = service_factory()
+        session_id = active_session_id()
+        if not session_id:
+            raise NoActiveSessionError("There is no training session open.")
+        body()
+        return ok({"snapshot": service.dev_deliver_next(
+            session_id, learner_ref())})
+
+
+def _frame(event_id, event_name, payload):
+    """One SSE frame. The revision is the event id, so reconnect is trivial."""
+    return ("id: %d\nevent: %s\ndata: %s\n\n"
+            % (event_id, event_name, json.dumps(payload, separators=(",", ":"))))
+
+
+def _last_event_id():
+    """The revision a reconnecting client last saw, if it told us.
+
+    Advisory only. It cannot make the server show a client anything it would
+    not otherwise show: the worst a forged value can do is make the stream
+    send one more revision frame than it needed to.
+    """
+    raw = request.headers.get("Last-Event-ID") or request.args.get("since")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 0 <= value <= 2 ** 53 - 1 else None

@@ -101,18 +101,45 @@ def test_world_endpoint_returns_the_whole_fixture_document(client):
     assert payload["prototype"]["kind"].startswith("fixture-backed")
 
 
-def test_prototype_exposes_no_state_changing_method(flask_app):
-    """A GET-only surface, so there is nothing to persist and nothing to forge.
+def test_every_state_changing_route_is_an_api_post(flask_app):
+    """Batch 2 gave this blueprint real state to change. Where it may live.
 
-    The application's CSRF gate only covers unsafe methods; a prototype route
-    that accepted one would need to justify itself, and none does.
+    Before Batch 2 the whole surface was GET-only, because there was nothing
+    to persist. There is now: a learner action reaches a real
+    ``SimulationSession``. So the property worth holding is no longer "nothing
+    is unsafe" but "everything unsafe is in one place, is a POST, and is
+    therefore covered by the application's global CSRF gate".
+
+    Concretely: every page a learner or trainer navigates to stays GET-only,
+    and every mutation is a POST under ``/prototype/api/``. Nothing uses PUT,
+    PATCH or DELETE -- one unsafe method is enough, and a second would be one
+    more thing for the gate to be checked against.
     """
     rules = [r for r in flask_app.url_map.iter_rules()
              if r.rule.startswith("/prototype")]
     assert rules
+
     for rule in rules:
         unsafe = rule.methods & {"POST", "PUT", "PATCH", "DELETE"}
-        assert unsafe == set(), "%s allows %s" % (rule.rule, sorted(unsafe))
+        if not unsafe:
+            continue
+        assert unsafe == {"POST"}, "%s allows %s" % (rule.rule, sorted(unsafe))
+        assert rule.rule.startswith("/prototype/api/"), (
+            "%s changes state but is not under /prototype/api/" % rule.rule)
+
+    # The pages themselves stay safe methods, so navigating cannot mutate.
+    page_rules = [r for r in rules if not r.rule.startswith("/prototype/api/")]
+    assert page_rules
+    for rule in page_rules:
+        assert rule.methods & {"POST", "PUT", "PATCH", "DELETE"} == set(), rule.rule
+
+
+def test_the_state_changing_routes_are_covered_by_the_global_csrf_gate(client):
+    """No exemption, no per-route opt-out: the same gate as every other POST."""
+    response = client.post("/prototype/api/session/start",
+                           json={"focus": "mixed", "mode": "practice"})
+    assert response.status_code == 400, response.status_code
+    assert b"csrf" in response.data.lower()
 
 
 # ===========================================================================
@@ -544,10 +571,17 @@ def test_the_comparison_never_uses_rewind_language():
 def test_the_comparison_is_removable_without_touching_the_workstation():
     """Its call site is guarded, so deleting the feature is a deletion, not a
     refactor. If this ever stops being true, removing a feature the
-    architecture has not frozen becomes expensive."""
+    architecture has not frozen becomes expensive.
+
+    Architecture S12 leaves the safer-alternative comparison provisional, so
+    the cost of removing it has to stay near zero. After Batch 2 the guard also
+    has a second job: if the script is absent, the workstation acknowledges the
+    pending comparison server-side rather than leaving the session waiting on a
+    screen that will never appear.
+    """
     workstation = (PROTOTYPE_STATIC / "workstation.js").read_text(encoding="utf-8")
-    assert "if (!window.RewindSecComparison) { done(); return; }" in workstation
-    # Exactly one place reaches for it, plus the guard.
+    assert "if (!window.RewindSecComparison) {" in workstation
+    # One guard, one call site, and nothing else reaches for it.
     assert workstation.count("window.RewindSecComparison") == 2
 
 
@@ -1030,9 +1064,20 @@ def test_assessment_still_suppresses_the_safer_alternative_screen():
     assessment = [m for m in scen.MODES if m["id"] == "assessment"][0]
     assert assessment["flags"]["safer_alternative"] is False
     assert assessment["flags"]["coaching"] is False
+
+    # Batch 2 moved the decision to the server. The client no longer chooses
+    # whether to show the comparison: it renders ``snapshot.comparison`` if the
+    # server sent one, and in an Assessment attempt the server sends none at
+    # all. The suppression is therefore an absence of data rather than a
+    # branch in the renderer, which is what makes it un-bypassable from
+    # developer tools. The projection-level assertion lives in
+    # tests/test_rewindsec2_workstation_leakage.py.
+    projection = (REPO_ROOT / "rewindsec" / "workstation"
+                  / "projection.py").read_text(encoding="utf-8")
+    assert "if assessment or not mode_flags.get(\"safer_alternative\"):" in projection
     workstation = (PROTOTYPE_STATIC / "workstation.js").read_text(
         encoding="utf-8")
-    assert "if (!S.flags.safer_alternative) { done(); return; }" in workstation
+    assert "var comparison = SNAP.comparison;" in workstation
 
 
 # -- isolation --------------------------------------------------------------
