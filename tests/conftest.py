@@ -49,6 +49,14 @@ def flask_app(tmp_path_factory):
     os.environ["FLASK_SECRET_KEY"] = "test-only-key"
     os.environ["SYNTHETIC_IDENTITY_SECRET"] = "test-only-identity-secret"
     os.environ["INSTRUCTOR_PASSWORD"] = INSTRUCTOR_PASSWORD
+    # Historical v1 suites deliberately exercise preserved provenance code.
+    # Production leaves these surfaces unmounted; this explicit test setting
+    # keeps the historical regression corpus meaningful without re-exposing it.
+    os.environ["REWINDSEC_ENABLE_LEGACY_V1_SURFACES"] = "1"
+    # HTTP route suites use their already-pinned local v1 sandbox and must not
+    # contact Docker through the independent RewindSec 2.0 projection.
+    os.environ["REWINDSEC2_SANDBOX_ENABLED"] = "0"
+    os.environ["REWINDSEC2_ENABLE_DEVELOPMENT_TOOLS"] = "1"
     sys.modules.pop("app", None)
 
     import app as app_module
@@ -70,7 +78,7 @@ def other_client(flask_app):
 CSRF_RE = re.compile(rb'name="csrf_token" value="([^"]+)"')
 
 
-def csrf_for(client, path="/instructor/login"):
+def csrf_for(client, path="/trainer/login"):
     """Scrape a valid CSRF token for this client's session from a GET page."""
     page = client.get(path)
     match = CSRF_RE.search(page.data)
@@ -80,7 +88,7 @@ def csrf_for(client, path="/instructor/login"):
 
 def login_instructor(client):
     token = csrf_for(client)
-    response = client.post("/instructor/login",
+    response = client.post("/trainer/login",
                            data={"password": INSTRUCTOR_PASSWORD,
                                  "csrf_token": token})
     assert response.status_code in (302, 303), response.status_code

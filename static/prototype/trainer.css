@@ -25,6 +25,110 @@
   background: transparent;
 }
 
+/* -- trainer authentication ------------------------------------------------
+ * The login uses the same chrome, type, controls and material system as the
+ * console without pretending that an unauthenticated visitor has a console
+ * identity or navigation yet. */
+.pw-auth-shell {
+  min-height: 100vh; min-height: 100dvh;
+  display: grid; grid-template-rows: auto 1fr auto;
+  color: var(--p-ink);
+}
+.pw-auth-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-6); padding: var(--s-6) clamp(var(--s-6), 4vw, var(--s-9));
+  background: linear-gradient(180deg, rgba(19, 51, 65, .82) 0%,
+                              rgba(7, 21, 29, .9) 100%);
+  border-bottom: 1px solid rgba(140, 214, 226, .14);
+  box-shadow: inset 0 1px 0 rgba(176, 236, 246, .12),
+              0 18px 38px -24px rgba(2, 8, 12, .9);
+}
+.pw-auth-brand {
+  display: inline-flex; align-items: center; gap: var(--s-4);
+  color: #fff; text-decoration: none;
+}
+.pw-auth-brand .pw-mark svg { width: 18px; height: 18px; color: #fff; }
+.pw-auth-brand b { display: block; font-size: var(--t-lg); letter-spacing: -.016em; }
+.pw-auth-brand small {
+  display: block; color: var(--d-muted); font-size: var(--t-xs);
+  line-height: 1.3;
+}
+.pw-auth-main {
+  display: grid; place-items: center;
+  width: 100%; padding: clamp(var(--s-8), 7vh, var(--s-11)) var(--s-6);
+}
+.pw-auth-card {
+  position: relative; width: min(100%, 27rem);
+  padding: clamp(var(--s-8), 5vw, var(--s-10));
+  border: 1px solid var(--p-line); border-radius: var(--p-r-2xl);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .98) 0%,
+                              rgba(246, 251, 252, .98) 100%);
+  box-shadow: var(--p-edge), var(--p-shadow-4);
+  animation: pw-reveal var(--p-slow) var(--p-ease-soft) both;
+}
+.pw-auth-card::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 2px;
+  border-radius: var(--p-r-2xl) var(--p-r-2xl) 0 0;
+  background: var(--g-accent);
+}
+.pw-auth-lock {
+  display: grid; place-items: center; width: 42px; height: 42px;
+  margin-bottom: var(--s-7); border-radius: var(--p-r);
+  color: var(--p-accent-ink); background: var(--p-accent-soft);
+  border: 1px solid var(--p-accent-line); box-shadow: var(--p-edge);
+}
+.pw-auth-lock svg { width: 21px; height: 21px; }
+.pw-auth-card h1 {
+  margin-top: var(--s-3); font-size: clamp(1.75rem, 6vw, 2.25rem);
+  line-height: 1.08; letter-spacing: -.035em; text-wrap: balance;
+}
+.pw-auth-lead {
+  max-width: 38ch; margin-top: var(--s-4); color: var(--p-muted);
+  line-height: 1.65; text-wrap: pretty;
+}
+.pw-auth-form { display: grid; gap: var(--s-6); margin-top: var(--s-8); }
+.pw-auth-form .pw-field { margin: 0; }
+.pw-auth-form .pw-input { width: 100%; min-height: 44px; }
+.pw-auth-form .pw-btn { width: 100%; justify-content: center; }
+.pw-auth-action { margin-top: var(--s-8); }
+.pw-auth-state {
+  display: grid; gap: var(--s-2); margin-top: var(--s-7);
+  padding: var(--s-5) var(--s-6); border-radius: var(--p-r);
+  border: 1px solid var(--p-line); background: var(--p-surface-2);
+  font-size: var(--t-sm); line-height: 1.5;
+}
+.pw-auth-state b { font-weight: 650; }
+.pw-auth-state span { color: var(--p-muted); }
+.pw-auth-state.is-error,
+.pw-auth-state.is-locked { border-color: var(--p-alert-line); background: var(--p-alert-soft); }
+.pw-auth-state.is-unconfigured { border-color: var(--p-caution-line); background: var(--p-caution-soft); }
+.pw-auth-foot {
+  padding: var(--s-6); text-align: center; color: var(--d-muted);
+  font-size: var(--t-xs);
+}
+.pw-tr-logout { margin-left: var(--s-2); }
+.pw-tr-logout .pw-btn { color: var(--d-ink-2); border-color: rgba(140, 214, 226, .18); }
+
+.pw-enrol-code-row {
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  margin-top: var(--s-3);
+}
+.pw-enrol-code-value {
+  display: inline-block; max-width: 100%; padding: var(--s-3) var(--s-4);
+  overflow-wrap: anywhere; font-family: var(--p-mono); font-size: var(--t-xs);
+  color: var(--p-ink); background: var(--p-surface-2);
+  border: 1px solid var(--p-line); border-radius: var(--p-r-xs);
+  user-select: all;
+}
+.pw-enrol-code-value:focus-visible { outline: 2px solid var(--p-focus-ink); outline-offset: 2px; }
+
+@media (max-width: 560px) {
+  .pw-auth-top { padding: var(--s-5) var(--s-6); }
+  .pw-auth-card { border-radius: var(--p-r-xl); padding: var(--s-8) var(--s-7); }
+  .pw-auth-foot { padding-top: var(--s-4); }
+  .pw-tr-logout { margin-left: auto; }
+}
+
 .pw-tr-top {
   position: sticky; top: 0; z-index: var(--z-topbar);
   /* Glass, like the workstation strip -- but the console is a quieter room,
@@ -75,7 +179,11 @@
 }
 .pw-tr-identity .pw-tr-who span { display: block; font-size: var(--t-xs); color: var(--d-ink-2); line-height: 1.35; }
 
-.pw-tr-tabs { display: flex; gap: var(--s-1); overflow-x: auto; }
+.pw-tr-tabs {
+  display: flex; gap: var(--s-1); overflow-x: auto;
+  scrollbar-width: none;
+}
+.pw-tr-tabs::-webkit-scrollbar { display: none; }
 .pw-tr-tab {
   display: inline-flex; align-items: center; gap: var(--s-3);
   padding: var(--s-4) var(--s-6) var(--s-5);

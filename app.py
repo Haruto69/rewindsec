@@ -1,6 +1,7 @@
 # app.py - RewindSec (educational) with Funnel Tracking
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
+from flask import (Flask, abort, flash, jsonify, redirect, render_template,
+                   request, session, url_for)
 from flask_sqlalchemy import SQLAlchemy
 import os
 import secrets
@@ -807,8 +808,17 @@ from sandbox_routes import (create_sandbox_blueprint, ensure_manager,
                             session_sandbox_id)
 from training_service import TrainingService
 
-app.register_blueprint(create_sandbox_blueprint(
-    db, SecurityEvent, app.config['SANDBOX_LOCAL_ROOT']))
+# Historical v1 learner/study/sandbox surfaces remain in the repository for
+# provenance and regression testing, but are no longer part of the normal 2.0
+# product.  A deliberate operator/test setting can mount them unchanged.
+LEGACY_V1_SURFACES_ENABLED = str(os.environ.get(
+    "REWINDSEC_ENABLE_LEGACY_V1_SURFACES", "")).strip().lower() in (
+        "1", "true", "yes", "on")
+app.config["LEGACY_V1_SURFACES_ENABLED"] = LEGACY_V1_SURFACES_ENABLED
+
+if LEGACY_V1_SURFACES_ENABLED:
+    app.register_blueprint(create_sandbox_blueprint(
+        db, SecurityEvent, app.config['SANDBOX_LOCAL_ROOT']))
 
 
 def sandbox_manager():
@@ -848,13 +858,13 @@ def training_service():
 # defined and given it as a callable, so the blueprint never imports ``app``.
 from training_routes import create_training_blueprint  # noqa: E402
 
-app.register_blueprint(create_training_blueprint(
-    db, TrainingExecution, IDENTITIES, training_service,
-    # Milestone R4: the ransomware module's consequence environment is the real
-    # disposable sandbox. It is handed the manager factory and the *derived*
-    # session->sandbox id function, never a sandbox id from a request.
-    sandbox_manager=sandbox_manager,
-    sandbox_id_for_session=session_sandbox_id))
+if LEGACY_V1_SURFACES_ENABLED:
+    app.register_blueprint(create_training_blueprint(
+        db, TrainingExecution, IDENTITIES, training_service,
+        # Historical v1 consequence environment, mounted only in explicit
+        # provenance/regression mode. RewindSec 2.0 never imports it.
+        sandbox_manager=sandbox_manager,
+        sandbox_id_for_session=session_sandbox_id))
 
 
 # --- RewindSec learning layer (Milestone R6) ---
@@ -882,11 +892,10 @@ def learning_service():
 
 from learning_routes import create_learning_blueprint  # noqa: E402
 
-app.register_blueprint(create_learning_blueprint(
-    TrainingExecution, learning_service,
-    # The canonical session id, read server-side. Never a pseudonymous label:
-    # a label is a display artifact and must not become an authenticator.
-    lambda: session.get("session_id")))
+if LEGACY_V1_SURFACES_ENABLED:
+    app.register_blueprint(create_learning_blueprint(
+        TrainingExecution, learning_service,
+        lambda: session.get("session_id")))
 
 
 # --- RewindSec research study (Milestone R7) ---
@@ -967,12 +976,11 @@ def study_service():
 
 from study_routes import create_study_blueprint  # noqa: E402
 
-app.register_blueprint(create_study_blueprint(
-    study_service,
-    # The canonical session id, read server-side. The study flow uses it for
-    # authorisation only and never exports it.
-    lambda: session.get("session_id"),
-    study_settings))
+if LEGACY_V1_SURFACES_ENABLED:
+    app.register_blueprint(create_study_blueprint(
+        study_service,
+        lambda: session.get("session_id"),
+        study_settings))
 
 
 # --- RewindSec 2.0 learner workstation (Batch 2) ---------------------------
@@ -1002,6 +1010,8 @@ from rewindsec.persistence.management_adapter import (  # noqa: E402
 from rewindsec.persistence.sqlalchemy_adapter import (  # noqa: E402
     SqlAlchemySessionRepository)
 from rewindsec.prototype.routes import create_prototype_blueprint  # noqa: E402
+from rewindsec.sandbox import (DockerSandboxAdapter, DockerSandboxConfig,
+                               SandboxCoordinator)  # noqa: E402
 from rewindsec.workstation.service import WorkstationService  # noqa: E402
 from rewindsec.workstation.updates import UpdateBroker  # noqa: E402
 
@@ -1009,6 +1019,26 @@ from rewindsec.workstation.updates import UpdateBroker  # noqa: E402
 #: authoritative for anything: losing it loses live updates until the next
 #: reconnect, never a fact.
 WORKSTATION_UPDATES = UpdateBroker()
+
+
+def _enabled(value, default=False):
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def workstation_sandbox():
+    """One operational Docker coordinator, absent only by explicit opt-out."""
+    if not _enabled(os.environ.get("REWINDSEC2_SANDBOX_ENABLED"), default=True):
+        return None
+    coordinator = getattr(app, "_rewindsec2_sandbox", None)
+    if coordinator is None:
+        image = os.environ.get(
+            "REWINDSEC2_SANDBOX_IMAGE", "rewindsec2-ransomware-sandbox:2.0")
+        coordinator = SandboxCoordinator(
+            DockerSandboxAdapter(DockerSandboxConfig(image=image)))
+        app._rewindsec2_sandbox = coordinator
+    return coordinator
 
 
 def workstation_repository():
@@ -1037,7 +1067,8 @@ def workstation_service():
     service = getattr(app, "_rewindsec2_service", None)
     if service is None:
         service = WorkstationService(workstation_repository(),
-                                     updates=WORKSTATION_UPDATES)
+                                     updates=WORKSTATION_UPDATES,
+                                     sandbox=workstation_sandbox())
         app._rewindsec2_service = service
     return service
 
@@ -1085,7 +1116,37 @@ app.register_blueprint(create_prototype_blueprint(
     # applied to every trainer page and every trainer API route. The trainer
     # console has no authorization mechanism of its own, and none is created
     # for it here.
-    require_trainer=require_instructor))
+    require_trainer=require_instructor,
+    development_tools=_enabled(
+        os.environ.get("REWINDSEC2_ENABLE_DEVELOPMENT_TOOLS"), default=False),
+    # Historical route tests deliberately mount the preserved prefix. The
+    # normal product owns clean browser and API routes.
+    url_prefix=("/prototype" if LEGACY_V1_SURFACES_ENABLED else "")))
+
+
+if not LEGACY_V1_SURFACES_ENABLED:
+    # Existing integrations may still call the pre-productization API paths.
+    # Keep exact aliases for those structured endpoints while the browser
+    # surfaces below canonicalize immediately to their clean public URLs.
+    for _rule in list(app.url_map.iter_rules()):
+        if (not _rule.endpoint.startswith("prototype.")
+                or not _rule.rule.startswith("/api/")):
+            continue
+        app.add_url_rule(
+            "/prototype" + _rule.rule,
+            endpoint="rewindsec2_compat_" + _rule.endpoint.replace(".", "_"),
+            view_func=app.view_functions[_rule.endpoint],
+            methods=sorted(_rule.methods - {"HEAD", "OPTIONS"}))
+
+    @app.route("/prototype", defaults={"legacy_path": ""})
+    @app.route("/prototype/", defaults={"legacy_path": ""})
+    @app.route("/prototype/<path:legacy_path>")
+    def rewindsec2_legacy_browser_path(legacy_path):
+        target = "/" + (legacy_path or "start")
+        query = request.query_string.decode("ascii", "ignore")
+        if query:
+            target += "?" + query
+        return redirect(target, code=308)
 
 
 def record_event(event_type, scenario_id=None, source=None, target=None,
@@ -1463,6 +1524,8 @@ with app.app_context():
 
 @app.route("/")
 def index():
+    if not LEGACY_V1_SURFACES_ENABLED:
+        return redirect(url_for("prototype.entry"))
     return render_template("index.html")
 
 
@@ -1471,9 +1534,9 @@ def index():
 # One role, one password, held in INSTRUCTOR_PASSWORD. When it is unset,
 # instructor login is impossible and every instructor route stays closed.
 
-@app.route("/instructor/login", methods=["GET", "POST"])
+@app.route("/trainer/login", methods=["GET", "POST"])
 def instructor_login():
-    next_path = safe_next(request.values.get("next", ""), fallback="/dashboard")
+    next_path = safe_next(request.values.get("next", ""), fallback="/trainer")
     if request.method == "GET":
         return render_instructor_login(next_path=next_path)
 
@@ -1484,14 +1547,14 @@ def instructor_login():
         response = render_instructor_login(
             error="Too many failed attempts. Try again in %d second(s)."
                   % retry_after,
-            status=429, next_path=next_path)
+            status=429, next_path=next_path, auth_state="locked",
+            retry_after=retry_after)
         return response[0], response[1], {"Retry-After": str(retry_after)}
 
     if not instructor_auth_configured():
         return render_instructor_login(
-            error="Instructor authentication is not configured on this "
-                  "deployment (INSTRUCTOR_PASSWORD is unset).",
-            status=503, next_path=next_path)
+            error="Trainer access is not available on this deployment.",
+            status=503, next_path=next_path, auth_state="unconfigured")
 
     if not check_instructor_password(request.form.get("password", "")):
         # Deliberately generic, and the submitted value is never echoed back.
@@ -1505,8 +1568,10 @@ def instructor_login():
         if locked_for:
             message += (" Too many failed attempts; locked for %d second(s)."
                         % locked_for)
-        return render_instructor_login(error=message, status=401,
-                                       next_path=next_path)
+        return render_instructor_login(
+            error=message, status=401, next_path=next_path,
+            auth_state="locked" if locked_for else "error",
+            retry_after=locked_for or None)
 
     # Successful authentication: clear the throttle bucket, then rotate the
     # whole session (fresh CSRF token, instructor flag re-set) inside
@@ -1522,7 +1587,17 @@ def instructor_login():
     return redirect(next_path)
 
 
-@app.route("/instructor/logout", methods=["POST"])
+@app.route("/instructor/login", methods=["GET", "POST"])
+def instructor_login_compat():
+    """Canonicalize the historical trainer-login URL without weakening POST."""
+    if request.method == "GET":
+        next_path = safe_next(request.args.get("next", ""),
+                              fallback="/trainer")
+        return redirect(url_for("instructor_login", next=next_path), code=308)
+    return instructor_login()
+
+
+@app.route("/trainer/logout", methods=["POST"])
 def instructor_logout():
     db.session.add(SecurityEvent(
         event_type=EventType.INSTRUCTOR_LOGGED_OUT,
@@ -1530,8 +1605,14 @@ def instructor_logout():
         source="auth:instructor", details="instructor session cleared"))
     db.session.commit()
     logout_instructor()
-    flash("Signed out of the instructor console.", "info")
+    flash("Signed out of the trainer console.", "info")
     return redirect(url_for("instructor_login"))
+
+
+@app.route("/instructor/logout", methods=["POST"])
+def instructor_logout_compat():
+    """Preserve historical POST clients while product links use /trainer."""
+    return instructor_logout()
 
 
 # DASHBOARD -- descriptive counts from the current-architecture subsystems,
@@ -1609,6 +1690,8 @@ def api_logs():
 
 @app.route('/resources')
 def resources():
+    if not LEGACY_V1_SURFACES_ENABLED:
+        abort(404)
     phishing_pdfs = [
         {"title": "Phishing Awareness Guide",
          "description": "Complete introduction to phishing threats.",
@@ -1632,7 +1715,10 @@ def resources():
 
 @app.errorhandler(404)
 def not_found(_error):
-    return render_template('404.html'), 404
+    if not LEGACY_V1_SURFACES_ENABLED:
+        return render_template('prototype/404.html'), 404
+    return render_template(
+        '404.html', legacy_v1_surfaces=LEGACY_V1_SURFACES_ENABLED), 404
 
 
 if __name__ == "__main__":

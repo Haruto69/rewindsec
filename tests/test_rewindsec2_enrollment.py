@@ -302,6 +302,23 @@ def test_a_browser_enrols_and_reaches_its_assignment(flask_app, client):
     assert started.get_json()["snapshot"]["session"]["mode"] == "assessment"
 
 
+def test_enrolment_trims_surrounding_whitespace_without_weakening_replay(
+        flask_app, client, other_client):
+    """Pasting a code may add whitespace; the code itself stays exact and
+    single-use after that transport-only normalization."""
+    _trainer_client, _token, student, _assessment, code = _seed_roster(
+        flask_app)
+
+    claimed = _post(client, "/prototype/api/enroll",
+                    {"code": "  %s\r\n" % code})
+    assert claimed.status_code == 201, claimed.data
+    assert claimed.get_json()["student"]["id"] == student["id"]
+
+    replayed = _post(other_client, "/prototype/api/enroll", {"code": code})
+    assert replayed.status_code == 409
+    assert replayed.get_json()["error"]["code"] == "enrollment_unusable"
+
+
 def test_the_enrol_route_accepts_a_code_and_nothing_else(flask_app, client):
     """The fields somebody would try to add here are exactly the dangerous
     ones, so they are rejected by name rather than ignored."""

@@ -52,5 +52,6 @@ def test_a_valid_token_is_accepted(instructor):
 
 def test_get_routes_stay_readable_without_a_token(client):
     assert client.get("/").status_code == 200
-    assert client.get("/instructor/login").status_code == 200
+    assert client.get("/trainer/login").status_code == 200
+    assert client.get("/instructor/login").status_code == 308
     assert client.get("/training/phishing").status_code == 200

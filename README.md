@@ -1105,3 +1105,65 @@ create and destroy their own short-lived containers and always clean up.
 
 ## License
 This project is for demonstration purposes only.
+
+---
+
+## RewindSec 2.0 Batch 6 operations
+
+The normal product starts at `/` or `/start`; its workstation and debrief are
+`/workstation` and `/results`. The trainer console starts at `/trainer/login`
+and continues under `/trainer`. Active browser code uses the canonical
+`/api/...` endpoints. Historical `/prototype/...` browser URLs redirect to the
+matching clean route, while exact legacy API paths remain narrow compatibility
+aliases.
+
+Historical v1 training, learning, study and instructor sandbox routes remain in
+source for provenance but are not mounted by default. A deliberate historical regression run may set
+`REWINDSEC_ENABLE_LEGACY_V1_SURFACES=1`; do not use that setting as the 2.0
+product. Development-only simulation controls are likewise off unless
+`REWINDSEC2_ENABLE_DEVELOPMENT_TOOLS=1` is explicitly set.
+
+### Docker 2.0 purpose and ownership
+
+Docker is only an isolated technical projection of four allowlisted synthetic
+ransomware file states. The database-backed RewindSec world decides and stores
+every consequence first. Docker never selects a file, consumes simulation RNG,
+advances time, scores an action or changes incident history. Missing/stale
+containers are reconstructed from persisted truth; a daemon/image/reconcile
+failure is an operational diagnostic and does not become simulation truth.
+
+Build the separately versioned v2 target from the repository root:
+
+```bash
+docker build --pull=false -t rewindsec2-ransomware-sandbox:2.0 -f docker/rewindsec2-target/Dockerfile .
+```
+
+The base tag is `python:3.12-slim`; record the resulting image ID/digest in each
+validation run. Normal sandbox operation requires no download, DNS or network.
+Runtime containers use network-none, numeric non-root identity, read-only root,
+all capabilities dropped, no-new-privileges, no host mounts/socket, an 8 MiB
+hardened tmpfs workspace, 64 MiB memory, 32 PIDs and 0.50 CPU. Set
+`REWINDSEC2_SANDBOX_IMAGE` only to an operator-controlled equivalent target, or
+`REWINDSEC2_SANDBOX_ENABLED=0` for a clearly uncontained development run.
+
+Run machine-readable engineering validation and actual-container checks:
+
+```bash
+python -m evaluation.rewindsec2.run_validation --samples 30 --concurrent-sessions 8 --output evaluation/results/rewindsec2/batch6-engineering-validation.json
+python -m evaluation.rewindsec2.containment --output evaluation/results/rewindsec2/batch6-docker-containment.json
+python -m pytest
+```
+
+The first two output paths are intentionally gitignored machine-specific
+results. Their schema/provenance definitions live in
+`evaluation/rewindsec2/evidence_registry.json`. A dirty-tree run is preliminary
+engineering evidence only. After review and commit, rerun the exact commands on
+the clean final commit to create citation-ready technical evidence. Historical
+`evaluation/results_manifest.json`, formal v1 result files and v1 harnesses are
+separate and must not be overwritten or relabelled.
+
+The implemented threat boundary and residual limits are in
+`docs/rewindsec2-security-misuse.md`. The required human checkpoint is in
+`docs/rewindsec2-final-manual-validation.md`; automated checks do not establish
+usability, realism, learning, retention, competence, transfer or psychometric
+validity.

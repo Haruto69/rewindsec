@@ -1270,3 +1270,54 @@ sandbox backends, or the v1 ransomware demo.
 | RewindSec 2.0 scoring (§6, Batch 4) | Deterministic, versioned, authored rubric (`rewindsec-scoring/v1`). It is implementation policy, not a validated measure of competence, retention or transfer; those require human research data this system does not collect. |
 | RewindSec 2.0 trainer records (§6, Batch 5) | Real persisted students, groups, many-to-many membership, assessments, assignment provenance and attempts. A completed attempt's result is the session's own finalized `ScoringResult`, stored under the versions that produced it - never a second, recomputed trainer score. |
 | RewindSec 2.0 trainer analytics (§6, Batch 5) | Derived from stored 2.0 sessions, versioned `rewindsec-trainer-metrics/v2`, each with an explicit denominator and an honest unavailable state. Technical telemetry about authored simulations; **not** evidence about competence, learning, retention or transfer. Fixture numbers in `trainer_fixtures.py` are demonstration data only and are never presented as measurements. |
+
+---
+
+## 8. RewindSec 2.0 Batch 6 boundary (additive chronology)
+
+Batch 6 starts from `e0ded68944d9e206631f5e99762dc52793a99736`. It does
+not rewrite the v1 chronology, manifests or formal results described above.
+
+The v2 technical ransomware boundary is `rewindsec/sandbox/` with target
+`docker/rewindsec2-target/`. It takes a canonical projection of the four
+server-owned ransomware file IDs only after the authoritative session write.
+Its management key is a one-way digest of the opaque session ID and consumes no
+simulation RNG. Docker failure is recorded in operational diagnostics, never in
+the world, scheduler, Context Ledger, causal graph or score. Terminal cleanup
+accepts only the derived key and the Docker adapter verifies exact v2 ownership
+and session labels before removal.
+
+This reuses containment *principles* from the historical `sandbox/` system but
+imports none of its datasets, managers, scenario logic, route APIs, labels or
+evaluation oracles. The historical `docker/sandbox-target/`, `sandbox/`,
+`evaluation/formal_run.py`, `evaluation/rewindsec_formal_run.py`, their
+specifications, `evaluation/results_manifest.json` and prior results remain v1.
+
+The new harness is separately versioned under `evaluation/rewindsec2/` and
+writes to `evaluation/results/rewindsec2/`. Its registry is
+`evaluation/rewindsec2/evidence_registry.json`. A run declares repository
+revision, dirtiness, source-tree fingerprint, environment, samples, failures,
+skips and limitations. Dirty Batch 6 artifacts are engineering/pre-commit
+evidence, not final-paper results. A later clean-final-commit run uses the same
+methodology unchanged.
+
+Default production wiring no longer mounts v1 training, learning, study,
+resources or instructor-sandbox blueprints. They remain available only through
+the explicit `REWINDSEC_ENABLE_LEGACY_V1_SURFACES=1` provenance/regression mode.
+The 2.0 `/prototype/api/dev/*` controls are also disabled by default. None of
+these routing decisions deletes or reinterprets historical source or data.
+
+The final productization pass gives the same Batch 6 implementation clean public
+browser routes (`/start`, `/workstation`, `/results`, `/trainer/...`) and
+canonical `/api/...` traffic. Historical `/prototype/...` browser paths only
+redirect, and exact old API paths remain compatibility aliases. Internal
+`rewindsec/prototype/`, template and static directory names are intentionally
+retained: they are implementation provenance, not product claims. Clipboard
+integrity controls now load only in the active workstation; login, enrollment,
+results and trainer administration retain normal browser clipboard behavior.
+
+Batch 6 technical checks may support bounded claims about deterministic replay,
+resume equality, authorization/misuse controls, session isolation, containment
+configuration/runtime observations and measured machine-local latency. They do
+not support human-effect, usability, realism, preference, competence, learning,
+retention, transfer, superiority or psychometric claims.

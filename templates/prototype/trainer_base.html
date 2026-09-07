@@ -15,13 +15,17 @@
       <div class="pw-tr-identity">
         <span class="pw-mark" aria-hidden="true"><svg viewBox="0 0 24 24" style="color:#fff"><use href="#i-mark"></use></svg></span>
         <span>
-          <b>RewindSec — Trainer console</b>
+          <b>RewindSec Trainer</b>
           <span>{{ view.trainer.organization }}</span>
         </span>
         <span class="pw-tr-who">
           <b>{{ view.trainer.name }}</b>
           <span>{{ view.trainer.role }}</span>
         </span>
+        <form class="pw-tr-logout" method="post" action="{{ url_for('instructor_logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="pw-btn is-sm is-quiet">Sign out</button>
+        </form>
       </div>
       <nav class="pw-tr-tabs" aria-label="Trainer sections">
         <a class="pw-tr-tab {% if active == 'dashboard' %}is-active{% endif %}"
@@ -45,8 +49,8 @@
           <svg aria-hidden="true"><use href="#i-clipboard"></use></svg> Assessments
         </a>
         <span class="pw-spacer"></span>
-        <a class="pw-tr-tab" href="{{ url_for('prototype.index') }}">
-          <svg aria-hidden="true"><use href="#i-back"></use></svg> Prototype home
+        <a class="pw-tr-tab" href="{{ url_for('prototype.entry') }}">
+          <svg aria-hidden="true"><use href="#i-back"></use></svg> Training
         </a>
       </nav>
     </div>
@@ -59,10 +63,14 @@
 {% endblock %}
 
 {% block dev_panel %}
+{% if development_tools_enabled %}
 {% include "prototype/_dev_panel.html" %}
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
+{% if development_tools_enabled %}
 <script src="{{ url_for('static', filename='prototype/dev-panel.js') }}" defer></script>
+{% endif %}
 {% block tr_scripts %}{% endblock %}
 {% endblock %}

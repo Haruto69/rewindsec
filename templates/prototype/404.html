@@ -1,0 +1,27 @@
+{% extends "prototype/_base.html" %}
+{% block title %}Page not found — RewindSec{% endblock %}
+{% block body_class %}is-console is-trainer-auth{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='prototype/trainer.css') }}">
+{% endblock %}
+{% block body %}
+<div class="pw-auth-shell">
+  <header class="pw-auth-top">
+    <a class="pw-auth-brand" href="{{ url_for('prototype.entry') }}" aria-label="RewindSec training">
+      <span class="pw-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-mark"></use></svg></span>
+      <span><b>RewindSec</b><small>Training</small></span>
+    </a>
+  </header>
+  <main class="pw-auth-main" id="pw-main">
+    <section class="pw-auth-card" aria-labelledby="pw-not-found-title">
+      <div class="pw-auth-lock" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-back"></use></svg></div>
+      <p class="pw-kicker">Error 404</p>
+      <h1 id="pw-not-found-title">Page not found</h1>
+      <p class="pw-auth-lead">The page you requested is not part of RewindSec.</p>
+      <p class="pw-auth-action">
+        <a class="pw-btn is-primary is-lg" href="{{ url_for('prototype.entry') }}">Start training</a>
+      </p>
+    </section>
+  </main>
+</div>
+{% endblock %}

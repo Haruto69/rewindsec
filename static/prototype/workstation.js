@@ -200,7 +200,7 @@
   }
 
   function refresh() {
-    return request('/prototype/api/session').then(adopt);
+    return request('/api/session').then(adopt);
   }
 
   /* Send one semantic action. The server decides what it means.
@@ -229,7 +229,7 @@
 
     pendingRequests += 1;
     renderBusy();
-    return request('/prototype/api/actions', { method: 'POST', body: payload })
+    return request('/api/actions', { method: 'POST', body: payload })
       .then(adopt)
       .catch(function (error) {
         if (error.status === 409 && !retried) {
@@ -2273,8 +2273,8 @@
     ended = true;
     stopStream();
     if (tickTimer) { window.clearInterval(tickTimer); }
-    request('/prototype/api/session/end', { method: 'POST', body: {} })
-      .then(function () { return request('/prototype/api/session/debrief'); })
+    request('/api/session/end', { method: 'POST', body: {} })
+      .then(function () { return request('/api/session/debrief'); })
       .then(function (payload) {
         try {
           window.sessionStorage.setItem('rewindsec.prototype.run',
@@ -2282,7 +2282,7 @@
         } catch (err) { /* private mode: the debrief falls back to its example */ }
       })
       .catch(function () { /* the results page falls back to its example */ })
-      .then(function () { window.location.href = '/prototype/results'; });
+      .then(function () { window.location.href = '/results'; });
   }
 
   // =========================================================================
@@ -2298,7 +2298,7 @@
   function startStream() {
     if (!window.EventSource) { return; }
     try {
-      stream = new window.EventSource('/prototype/api/events');
+      stream = new window.EventSource('/api/events');
     } catch (err) {
       stream = null;
       return;
@@ -2330,7 +2330,7 @@
     tickTimer = window.setInterval(function () {
       if (ended || !SNAP || !SNAP.session.active) { return; }
       if (document.hidden) { return; }
-      request('/prototype/api/session/tick', { method: 'POST', body: {} })
+      request('/api/session/tick', { method: 'POST', body: {} })
         .then(adopt)
         .catch(function () { /* transient; the next tick tries again */ });
     }, 4000);
@@ -2527,7 +2527,7 @@
   function startNew() {
     var assessmentId = param('assessment');
     if (assessmentId) {
-      return request('/prototype/api/session/assessment/start', {
+      return request('/api/session/assessment/start', {
         method: 'POST',
         body: { assessment_id: assessmentId }
       }).then(adopt).catch(function (error) {
@@ -2538,7 +2538,7 @@
         throw error;
       });
     }
-    return request('/prototype/api/session/start', {
+    return request('/api/session/start', {
       method: 'POST',
       body: { focus: param('focus') || 'mixed', mode: param('mode') || 'simulation' }
     }).then(adopt).catch(function (error) {

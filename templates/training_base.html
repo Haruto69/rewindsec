@@ -2,7 +2,11 @@
 {# Normal (non-study, non-instructor) product nav: Home / Training / Resources / Instructor. #}
 {% block nav %}
   <a href="{{ url_for('index') }}">Home</a>
-  <a href="{{ url_for('training.home') }}">Training</a>
-  <a href="{{ url_for('resources') }}">Resources</a>
+  {% if config.get('LEGACY_V1_SURFACES_ENABLED') %}
+    <a href="{{ url_for('training.home') }}">Training</a>
+    <a href="{{ url_for('resources') }}">Resources</a>
+  {% else %}
+    <a href="{{ url_for('prototype.entry') }}">Training</a>
+  {% endif %}
   <a href="{{ url_for('instructor_login') }}">Instructor</a>
 {% endblock %}

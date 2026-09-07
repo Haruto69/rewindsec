@@ -20,12 +20,7 @@
 {% block skip_target %}pw-workarea{% endblock %}
 
 {% block body %}
-<div class="pw-ws" id="pw-ws" data-has-session="{{ 1 if has_session else 0 }}">
-
-  <div class="pw-protobanner" role="note" id="pw-ws-banner">
-    <strong>Prototype</strong>
-    <span>{{ prototype_banner }}</span>
-  </div>
+<div class="pw-ws is-bannerless" id="pw-ws" data-has-session="{{ 1 if has_session else 0 }}">
 
   <header class="pw-top">
     <span class="pw-top-org">
@@ -191,11 +186,15 @@
 {% endblock %}
 
 {% block dev_panel %}
+{% if development_tools_enabled %}
 {% include "prototype/_dev_panel.html" %}
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
+{% if development_tools_enabled %}
 <script src="{{ url_for('static', filename='prototype/dev-panel.js') }}" defer></script>
+{% endif %}
 {# PROVISIONAL feature (architecture §12) — loaded before the workstation so
    the workstation can call it if it is present, and simply skip the call if
    it is not. #}

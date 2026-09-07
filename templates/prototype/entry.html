@@ -16,8 +16,8 @@
         <span>{{ org.name }}</span>
       </span>
     </span>
-    <nav class="pw-frame-nav" aria-label="Prototype sections">
-      <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.index') }}">Prototype home</a>
+    <nav class="pw-frame-nav" aria-label="RewindSec navigation">
+      <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.trainer_dashboard') }}">Trainer</a>
     </nav>
   </div>
 </header>
@@ -74,7 +74,8 @@
       </p>
       <div class="pw-row" style="gap:.5rem;flex-wrap:wrap">
         <input class="pw-input" id="pw-enrol-code" name="code" type="text"
-               autocomplete="off" spellcheck="false" maxlength="128"
+               autocomplete="one-time-code" autocapitalize="none"
+               spellcheck="false" maxlength="128" enterkeyhint="done"
                placeholder="Enrolment code" style="min-width:22ch">
         <button type="submit" class="pw-btn">Enrol this device</button>
       </div>
@@ -278,7 +279,7 @@
       if (startable) {
         var link = document.createElement('a');
         link.className = 'pw-btn';
-        link.href = '/prototype/workstation?assessment='
+        link.href = '/workstation?assessment='
           + encodeURIComponent(row.id);
         link.textContent = row.active_attempt ? 'Resume attempt'
                                               : 'Start attempt';
@@ -296,9 +297,9 @@
   }
 
   function load() {
-    return get('/prototype/api/me')
+    return get('/api/me')
       .then(function (r) { renderWho(r.ok ? r.body.student : null); })
-      .then(function () { return get('/prototype/api/assessments'); })
+      .then(function () { return get('/api/assessments'); })
       .then(function (r) { renderAssessments(r.ok ? r.body.assessments : []); })
       .catch(function () {
         text(who, 'Assigned training could not be loaded.');
@@ -310,7 +311,7 @@
     var code = (field.value || '').trim();
     if (!code) { text(status, 'Enter the code your trainer gave you.'); return; }
     text(status, 'Checking…');
-    post('/prototype/api/enroll', {code: code}).then(function (r) {
+    post('/api/enroll', {code: code}).then(function (r) {
       if (!r.ok) {
         /* The server answers every unusable code the same way, on purpose.
          * This screen does not embellish it. */

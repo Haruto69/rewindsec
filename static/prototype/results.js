@@ -140,8 +140,8 @@
     try {
       var raw = window.sessionStorage.getItem(STORAGE_KEY);
       if (raw) { return JSON.parse(raw); }
-    } catch (err) { /* fall through to the example */ }
-    return exampleRun();
+    } catch (err) { /* handled by the empty results state below */ }
+    return null;
   }
 
   // -----------------------------------------------------------------------
@@ -367,7 +367,6 @@
         + '<div class="pw-causal-head">'
         + '<b>' + esc(decision.label || chain.decisionId) + '</b>'
         + '<span>' + esc(chain.title) + ' · started ' + esc(chain.startedAt)
-        + (chain.incidentId ? ' · incident ' + esc(chain.incidentId) : '')
         + '</span></div>'
         + '<div class="pw-causal-body">' + (nodes
             || '<p class="pw-small pw-muted">The chain had not reached its '
@@ -430,11 +429,8 @@
       return task.state === 'outstanding' || task.state === 'interrupted';
     });
 
-    qs('#pw-res-sub').textContent = run.example
-      ? 'An authored example session, shown because this page was opened '
-        + 'directly rather than from a workstation run.'
-      : 'You worked for ' + run.durationMinutes + ' simulated minutes and '
-        + 'finished at ' + run.endedAt + '.';
+    qs('#pw-res-sub').textContent = 'You worked for ' + run.durationMinutes
+      + ' simulated minutes and finished at ' + run.endedAt + '.';
 
     var chips = [
       '<span class="pw-chip is-plain">' + esc(focusLabel(world, run.focus)) + ' focus</span>',
@@ -457,7 +453,7 @@
     qs('#pw-res-meta').innerHTML = chips.join('');
 
     var retry = qs('#pw-res-retry');
-    retry.href = '/prototype/workstation?focus=' + encodeURIComponent(run.focus)
+    retry.href = '/workstation?focus=' + encodeURIComponent(run.focus)
       + '&mode=' + encodeURIComponent(run.mode)
       + (run.assessmentId ? '&assessment=' + encodeURIComponent(run.assessmentId) : '');
 
@@ -532,21 +528,31 @@
     note.className = 'pw-xsmall pw-muted';
     note.style.marginTop = '.5rem';
     note.textContent = real
-      ? real.note + ' (' + real.rubric_version + ')'
-      : 'These figures are an authored demonstration only -- this run '
-        + 'predates RewindSec 2.0\'s real scoring rubric and was never '
-        + 'scored by it.';
+      ? real.note
+      : 'A finalized score is unavailable for this earlier session.';
     var overall = qs('#pw-res-overall');
     if (overall && overall.parentNode) { overall.parentNode.appendChild(note); }
   }
 
-  fetch('/prototype/api/world', { headers: { Accept: 'application/json' } })
+  var completedRun = loadRun();
+  if (!completedRun) {
+    qs('#pw-main').innerHTML = ''
+      + '<section class="pw-card pw-empty" aria-labelledby="pw-empty-title">'
+      + '<p class="pw-kicker">Session results</p>'
+      + '<h1 id="pw-empty-title">No completed session</h1>'
+      + '<p>Finish a training session to see its debrief and finalized score.</p>'
+      + '<p style="margin-top:1rem"><a class="pw-btn is-primary" href="/start">Start training</a></p>'
+      + '</section>';
+    return;
+  }
+
+  fetch('/api/world', { headers: { Accept: 'application/json' } })
     .then(function (response) { return response.json(); })
     .then(function (world) {
-      var run = loadRun();
+      var run = completedRun;
       var real = realScoring(run);
-      var scores = real ? scoresFromReal(real) : score(run);
-      var overall = real ? real.overall : overallScore(scores, world.demo_weights);
+      var scores = real ? scoresFromReal(real) : {};
+      var overall = real ? real.overall : null;
 
       renderHero(run, overall, world);
       if (real) { renderRealDimensions(real); } else { renderDimensions(world, scores); }

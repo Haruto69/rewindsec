@@ -1,0 +1,50 @@
+{
+  "schema_version": "rewindsec2-evidence-registry/v1",
+  "architecture_version": "RewindSec_2.0_Architecture_Specification_v1.1",
+  "artifacts": [
+    {
+      "artifact_id": "rewindsec2-engineering-validation-precommit",
+      "artifact_type": "engineering_validation",
+      "title": "Batch 6 deterministic, resume, isolation and performance run",
+      "implementation_harness_version": "rewindsec2-validation-harness/v1",
+      "repository_revision_context": "base e0ded68944d9e206631f5e99762dc52793a99736; generated record declares dirty state and source fingerprint",
+      "date": null,
+      "environment": "captured in artifact",
+      "source_path": "evaluation/results/rewindsec2/batch6-engineering-validation.json",
+      "checksum_sha256": null,
+      "claims_supported": [
+        "deterministic repeatability for the recorded cases",
+        "persistence/resume equality for the recorded cases",
+        "bounded local session-isolation checks",
+        "descriptive local engineering latency measurements"
+      ],
+      "provenance": "Generated only by evaluation.rewindsec2.run_validation",
+      "limitations_exclusions": [
+        "Pre-commit artifact when working tree is dirty",
+        "Not human-subject evidence, a penetration test, or production-scale load evidence"
+      ]
+    },
+    {
+      "artifact_id": "rewindsec2-docker-containment-precommit",
+      "artifact_type": "docker_runtime_containment",
+      "title": "Batch 6 actual-container containment checks",
+      "implementation_harness_version": "rewindsec2-validation-harness/v1",
+      "repository_revision_context": "base e0ded68944d9e206631f5e99762dc52793a99736; generated record is preliminary",
+      "date": null,
+      "environment": "captured in artifact",
+      "source_path": "evaluation/results/rewindsec2/batch6-docker-containment.json",
+      "checksum_sha256": null,
+      "claims_supported": [
+        "runtime Docker containment only when every recorded check passed",
+        "cross-session sandbox isolation for the recorded local run",
+        "label-scoped cleanup for the recorded local run"
+      ],
+      "provenance": "Generated only by evaluation.rewindsec2.containment",
+      "limitations_exclusions": [
+        "Blocked is not pass",
+        "One local Docker host only",
+        "No malware, exploit, or destructive payload was used"
+      ]
+    }
+  ]
+}

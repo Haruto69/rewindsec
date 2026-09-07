@@ -25,7 +25,7 @@
         <span class="pw-avatar is-lg" aria-hidden="true">{{ view.student.initials }}</span>
         <div>
           <h2>{{ view.student.display_name }}</h2>
-          <p>{{ view.student.reference or view.student.student_id }}</p>
+          <p>{{ view.student.reference or 'No reference supplied' }}</p>
         </div>
       </div>
       <dl>
@@ -129,7 +129,6 @@
               <td class="is-num">
                 {% if attempt.overall is not none %}
                   <span class="pw-strong">{{ attempt.overall }}</span>
-                  <div class="pw-xsmall pw-muted">{{ attempt.rubric_version }}</div>
                 {% else %}<span class="pw-muted">—</span>{% endif %}
               </td>
             </tr>
@@ -177,7 +176,7 @@
                 </div>
                 {% endif %}
               </td>
-              <td class="pw-xsmall pw-muted">{{ row.profile or '—' }}</td>
+              <td class="pw-xsmall pw-muted">{{ row.profile.split(' · ')[0] if row.profile else '—' }}</td>
               <td>
                 {% if not row.readable %}
                   <span class="pw-chip is-caution">Unreadable</span>

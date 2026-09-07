@@ -64,14 +64,17 @@ def test_records_survive_service_recreation(tmp_path):
 
 def test_assessment_round_trips_with_its_retry_policy(tmp_path):
     management, _ws, _sessions = build(sqlite_uri(tmp_path))
+    # Batch 5's frozen feasibility policy derives BEC's currently presentable
+    # scored-interaction capacity as three.  The persistence round trip must
+    # use a definition the runtime can actually satisfy.
     created = management.create_assessment(
-        "Payment authorisation", "bec", 4, status="open", max_attempts=3,
+        "Payment authorisation", "bec", 3, status="open", max_attempts=3,
         window_label="1 - 30 September", note="Finance facing.")
 
     reloaded = management.get_assessment(created.assessment_id)
     assert reloaded == created
     assert reloaded.focus == "bec"
-    assert reloaded.required_interactions == 4
+    assert reloaded.required_interactions == 3
     assert reloaded.max_attempts == 3
     assert reloaded.retry_policy == RETRY_POLICY_BOUNDED
     assert reloaded.definition_version == "rewindsec-assessment-definition/v1"

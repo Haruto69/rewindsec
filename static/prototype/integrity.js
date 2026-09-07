@@ -1,16 +1,15 @@
-/* RewindSec 2.0 UI prototype — learner integrity controls.
+/* RewindSec 2.0 — active-simulation integrity controls.
  *
  * One controller for the whole learner surface, rather than a handler per
- * field. It runs only where the *server* said the page is a learner surface
- * (``<body data-integrity="learner">``), so a trainer screen cannot acquire
- * these restrictions by accident and a learner screen cannot lose them by
- * someone forgetting to decorate a newly added input.
+ * field. It runs only where the *server* marked the active workstation
+ * (``<body data-integrity="simulation">``), so login, enrollment, debrief and
+ * trainer forms cannot acquire these restrictions by accident.
  *
  * What it does
  * ------------
- * 1. Cancels ``copy``, ``cut`` and ``paste`` anywhere on a learner surface
+ * 1. Cancels ``copy``, ``cut`` and ``paste`` in the active workstation
  *    except inside a region explicitly marked ``data-clipboard="allow"``.
- *    Notes carries that marker, and so does the prototype developer panel.
+ *    Notes carries that marker, as does explicitly enabled diagnostic tooling.
  * 2. Notices a PrintScreen key event and explains, once, why capturing the
  *    workspace is not part of the exercise.
  *
@@ -35,7 +34,7 @@
   'use strict';
 
   var root = document.body;
-  if (!root || root.getAttribute('data-integrity') !== 'learner') { return; }
+  if (!root || root.getAttribute('data-integrity') !== 'simulation') { return; }
 
   /* Regions where the clipboard works normally. Notes is the one learner
    * application with the marker: a learner who needs to keep something has
@@ -242,7 +241,7 @@
   document.addEventListener('keyup', onPrintScreen, true);
 
   window.RewindSecIntegrity = {
-    scope: 'learner',
+    scope: 'simulation',
     allowSelector: ALLOW,
     // Exposed so the prototype tooling can demonstrate the notice without a
     // reviewer having to trigger a real capture attempt.

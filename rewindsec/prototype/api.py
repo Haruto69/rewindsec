@@ -66,7 +66,7 @@ reads the token from a meta tag the server rendered and sends it in the
 
 import json
 
-from flask import Response, jsonify, request, session, stream_with_context
+from flask import Response, abort, jsonify, request, session, stream_with_context
 
 from rewindsec.management.ports import ManagementError, NotFoundError
 from rewindsec.management.service import ManagementRefused
@@ -107,7 +107,7 @@ SSE_MAX_SECONDS = 300
 
 
 def register_workstation_api(bp, service_factory, updates,
-                             management_factory=None):
+                             management_factory=None, development_tools=True):
     """Attach the learner API to the prototype blueprint.
 
     ``service_factory`` is a zero-argument callable returning the configured
@@ -163,6 +163,10 @@ def register_workstation_api(bp, service_factory, updates,
         if exc.detail:
             payload["error"]["detail"] = exc.detail
         return jsonify(payload), exc.status
+
+    def require_development_tools():
+        if not development_tools:
+            abort(404)
 
     @bp.errorhandler(WorkstationError)
     def _workstation_error(exc):
@@ -643,6 +647,7 @@ def register_workstation_api(bp, service_factory, updates,
 
     @bp.route("/api/dev/advance", methods=["POST"])
     def api_dev_advance():
+        require_development_tools()
         service = service_factory()
         session_id = active_session_id()
         if not session_id:
@@ -662,6 +667,7 @@ def register_workstation_api(bp, service_factory, updates,
 
     @bp.route("/api/dev/deliver-next", methods=["POST"])
     def api_dev_deliver_next():
+        require_development_tools()
         service = service_factory()
         session_id = active_session_id()
         if not session_id:
@@ -685,6 +691,7 @@ def register_workstation_api(bp, service_factory, updates,
         use it, and the response is the ordinary learner projection -- the same
         document, filtered the same way, with no engine field in it.
         """
+        require_development_tools()
         service = service_factory()
         session_id = active_session_id()
         if not session_id:
@@ -713,6 +720,7 @@ def register_workstation_api(bp, service_factory, updates,
         about to happen, and there must be exactly one document a learner's
         browser receives -- the projection -- with none of it in there.
         """
+        require_development_tools()
         service = service_factory()
         session_id = active_session_id()
         if not session_id:

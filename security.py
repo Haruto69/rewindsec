@@ -280,8 +280,15 @@ def safe_next(target, fallback="/dashboard"):
     return target
 
 
-def render_instructor_login(error=None, status=200, next_path=None):
+def render_instructor_login(error=None, status=200, next_path=None,
+                            auth_state=None, retry_after=None):
+    configured = instructor_auth_configured()
+    if auth_state is None:
+        auth_state = "unconfigured" if not configured else (
+            "error" if error else "ready")
     return render_template("instructor_login.html",
                            error=error,
-                           configured=instructor_auth_configured(),
+                           configured=configured,
+                           auth_state=auth_state,
+                           retry_after=retry_after,
                            next_path=next_path or ""), status

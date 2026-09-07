@@ -1,34 +1,53 @@
-{% extends "training_base.html" %}
-{% block title %}Instructor sign in — RewindSec{% endblock %}
-{% block content %}
-<section class="rs-card rs-login-card">
-  <h1>Instructor console</h1>
-  <p class="rs-lead">Sign in to reach the dashboard, sandbox controls and scenario telemetry.</p>
+{% extends "prototype/_base.html" %}
+{% block title %}Trainer login — RewindSec{% endblock %}
+{% block body_class %}is-console is-trainer-auth{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='prototype/trainer.css') }}">
+{% endblock %}
+{% block body %}
+<div class="pw-auth-shell">
+  <header class="pw-auth-top">
+    <a class="pw-auth-brand" href="{{ url_for('prototype.entry') }}" aria-label="RewindSec training">
+      <span class="pw-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-mark"></use></svg></span>
+      <span><b>RewindSec</b><small>Trainer</small></span>
+    </a>
+    <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.entry') }}">Back to training</a>
+  </header>
 
-  {% if error %}
-  <p class="rs-note error">{{ error }}</p>
-  {% endif %}
+  <main class="pw-auth-main" id="pw-main">
+    <section class="pw-auth-card" aria-labelledby="pw-auth-title">
+      <div class="pw-auth-lock" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-shield"></use></svg></div>
+      <p class="pw-kicker">Trainer access</p>
+      <h1 id="pw-auth-title">Trainer login</h1>
+      <p class="pw-auth-lead">Sign in to manage students, groups, assessments and results.</p>
 
-  {% if not configured %}
-  <p class="rs-note warn">
-    <strong>Not configured.</strong> Set <code>INSTRUCTOR_PASSWORD</code> in the
-    environment before starting the app. Until then the instructor routes stay closed.
-  </p>
-  {% endif %}
+      {% if error %}
+      <div class="pw-auth-state is-{{ auth_state }}" role="alert">
+        <b>{% if auth_state == 'locked' %}Login temporarily locked{% elif auth_state == 'unconfigured' %}Login unavailable{% else %}Sign-in failed{% endif %}</b>
+        <span>{{ error }}</span>
+      </div>
+      {% elif not configured %}
+      <div class="pw-auth-state is-unconfigured" role="status">
+        <b>Login unavailable</b>
+        <span>Trainer access has not been enabled for this deployment.</span>
+      </div>
+      {% endif %}
 
-  <form method="post" action="{{ url_for('instructor_login') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="next" value="{{ next_path }}">
-    <div class="rs-field">
-      <label for="password">Instructor password</label>
-      <input id="password" type="password" name="password" autocomplete="current-password" required>
-    </div>
-    <button type="submit" class="rs-btn">Sign in</button>
-  </form>
+      <form class="pw-auth-form" method="post" action="{{ url_for('instructor_login') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="next" value="{{ next_path }}">
+        <div class="pw-field">
+          <label class="pw-label" for="password">Trainer password</label>
+          <input class="pw-input" id="password" type="password" name="password"
+                 autocomplete="current-password" required autofocus
+                 {% if not configured %}disabled aria-disabled="true"{% endif %}>
+        </div>
+        <button type="submit" class="pw-btn is-primary is-lg"
+                {% if not configured %}disabled{% endif %}>Sign in</button>
+      </form>
+    </section>
+  </main>
 
-  <p class="rs-meta" style="margin-top:1rem;">
-    This password is a lab access control, not a learner account. Nothing you
-    type here is stored; it is compared against the configured value and discarded.
-  </p>
-</section>
+  <footer class="pw-auth-foot">Synthetic training environment · Authorized trainers only</footer>
+</div>
 {% endblock %}

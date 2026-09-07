@@ -14,7 +14,7 @@ INSTRUCTOR_POST_ROUTES = ["/sandbox/create", "/sandbox/reset",
 def test_get_routes_require_instructor(client, path):
     response = client.get(path)
     assert response.status_code == 302
-    assert "/instructor/login" in response.headers["Location"]
+    assert "/trainer/login" in response.headers["Location"]
 
 
 @pytest.mark.parametrize("path", INSTRUCTOR_ROUTES)

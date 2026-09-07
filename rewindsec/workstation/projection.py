@@ -442,6 +442,12 @@ def _page_view(session, url, page):
 # Notifications, notes, tasks, incidents
 # ---------------------------------------------------------------------------
 
+# Rendering bounds for low-end clients.  The authoritative world and its
+# immutable history remain complete; only the current browser projection is
+# bounded.  Newest entries win, matching the existing sort order.
+MAX_RENDERED_NOTIFICATIONS = 100
+MAX_RENDERED_MESSAGE_ENTRIES = 200
+
 def _notifications_view(session):
     entries = []
     for notification_id, state in session.world.get_component(NS_NOTIFICATIONS).items():
@@ -458,7 +464,7 @@ def _notifications_view(session):
             "order": state.get("order", 0),
         })
     entries.sort(key=lambda item: item["order"], reverse=True)
-    return entries
+    return entries[:MAX_RENDERED_NOTIFICATIONS]
 
 
 def _notes_view(session):
@@ -579,7 +585,7 @@ def _messages_view(session):
             "entries": [
                 {"from": entry.get("from", ""), "when": entry.get("when", ""),
                  "text": entry.get("text", "")}
-                for entry in state.get("entries") or []
+                for entry in (state.get("entries") or [])[-MAX_RENDERED_MESSAGE_ENTRIES:]
             ],
             # The button label only. What the colleague actually says arrives
             # as a real message, appended by the server when the learner asks.

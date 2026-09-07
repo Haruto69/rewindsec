@@ -149,13 +149,13 @@ class TestInstructorOnly:
         with research_mode(flask_app):
             response = client.get(ADMIN)
             assert response.status_code in (302, 303)
-            assert "/instructor/login" in response.headers["Location"]
+            assert "/trainer/login" in response.headers["Location"]
 
     def test_export_requires_instructor_auth(self, flask_app, client):
         with research_mode(flask_app):
             response = client.get(EXPORT)
             assert response.status_code in (302, 303)
-            assert "/instructor/login" in response.headers["Location"]
+            assert "/trainer/login" in response.headers["Location"]
 
     def test_a_participant_cannot_see_aggregate_research_data(self, flask_app,
                                                               client):

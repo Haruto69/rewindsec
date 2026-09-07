@@ -32,8 +32,8 @@ __all__ = ["dashboard", "students_overview", "student_detail",
 #: role rather than inventing a person -- the fixture console's named trainer
 #: was demonstration data and does not survive into the real screens.
 TRAINER_IDENTITY = {
-    "name": "Instructor",
-    "role": "Trainer console",
+    "name": "Trainer",
+    "role": "Authorized console",
     "organization": "RewindSec 2.0",
 }
 

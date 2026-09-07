@@ -94,7 +94,6 @@ RENDER_CHECKS = [
     ("/training/mfa", "get", 200) ,
     ("/training/bec", "get", 200),
     ("/resources", "get", 200),
-    ("/instructor/login", "get", 200),
 ]
 
 
@@ -115,6 +114,14 @@ def test_instructor_pages_render_with_the_shared_stylesheet(instructor):
         page = instructor.get(path)
         assert page.status_code == 200
         assert b"rewindsec.css" in page.data
+
+
+def test_canonical_trainer_login_uses_the_rewindsec2_product_styles(client):
+    page = client.get("/trainer/login")
+    assert page.status_code == 200
+    assert b"prototype/base.css" in page.data
+    assert b"prototype/trainer.css" in page.data
+    assert b"rewindsec.css" not in page.data
 
 
 def test_study_admin_renders_with_the_shared_stylesheet_when_enabled(
@@ -217,6 +224,6 @@ def test_study_base_template_declares_no_nav_links():
 def test_instructor_sign_out_is_a_csrf_protected_post_form(instructor):
     page = instructor.get("/dashboard")
     body = page.data.decode()
-    assert 'action="/instructor/logout"' in body
+    assert 'action="/trainer/logout"' in body
     assert 'method="post"' in body.lower()
     assert "csrf_token" in body

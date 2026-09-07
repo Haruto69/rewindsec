@@ -35,7 +35,7 @@
             <span class="pw-avatar is-neutral" aria-hidden="true">{{ row.student.initials }}</span>
             <span style="min-width:0">
               <a href="{{ url_for('prototype.trainer_student', student_id=row.student.student_id) }}">{{ row.student.display_name }}</a>
-              <div class="pw-xsmall pw-muted">{{ row.student.reference or row.student.student_id }}</div>
+              <div class="pw-xsmall pw-muted">{{ row.student.reference or 'No reference supplied' }}</div>
             </span>
           </span>
         </td>
@@ -159,7 +159,7 @@
     var out = document.querySelector(
       '[data-enrol-out="' + studentId + '"]');
     button.disabled = true;
-    fetch('/prototype/api/trainer/students/'
+    fetch('/api/trainer/students/'
           + encodeURIComponent(studentId) + '/enrollment-code', {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json',
@@ -171,11 +171,55 @@
         out.innerHTML = '';
         var code = document.createElement('code');
         code.textContent = payload.enrollment.code;
+        code.tabIndex = 0;
+        code.className = 'pw-enrol-code-value';
+        var copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'pw-btn is-sm is-quiet';
+        copy.textContent = 'Copy code';
         var note = document.createElement('div');
         note.className = 'pw-xsmall pw-muted';
+        note.setAttribute('role', 'status');
         note.textContent = 'Give this to the learner. It works once.';
-        out.appendChild(code);
+        var row = document.createElement('div');
+        row.className = 'pw-enrol-code-row';
+        row.appendChild(code);
+        row.appendChild(copy);
+        out.appendChild(row);
         out.appendChild(note);
+        copy.addEventListener('click', function () {
+          var value = code.textContent;
+          function copied() {
+            copy.textContent = 'Copied';
+            note.textContent = 'Code copied. It works once.';
+            window.setTimeout(function () { copy.textContent = 'Copy code'; }, 2200);
+          }
+          function fallback() {
+            var area = document.createElement('textarea');
+            area.value = value;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (ignore) { ok = false; }
+            document.body.removeChild(area);
+            if (ok) { copied(); return; }
+            var range = document.createRange();
+            range.selectNodeContents(code);
+            var selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            note.textContent = 'Select the code and copy it manually.';
+            code.focus();
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(copied, fallback);
+          } else {
+            fallback();
+          }
+        });
         button.hidden = true;
       } else if (out) {
         out.textContent = (payload && payload.error && payload.error.message)

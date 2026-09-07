@@ -73,7 +73,7 @@ def research_mode(flask_app, enabled=True, secret=STUDY_ASSIGNMENT_SECRET,
 #: necessary one: the study flow deliberately redirects away from a page once
 #: its step is done, which is exactly the behaviour the repeat-submission tests
 #: need to POST against.
-TOKEN_PAGE = "/instructor/login"
+TOKEN_PAGE = "/trainer/login"
 
 
 def token_for(client, form_page):

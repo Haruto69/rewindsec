@@ -6,7 +6,11 @@
   <p class="rs-lead">The page you requested does not exist.</p>
   <div class="rs-actions">
     <a class="rs-btn" href="{{ url_for('index') }}">Return home</a>
-    <a class="rs-btn secondary" href="{{ url_for('training.home') }}">Training modules</a>
+    {% if legacy_v1_surfaces %}
+      <a class="rs-btn secondary" href="{{ url_for('training.home') }}">Training modules</a>
+    {% else %}
+      <a class="rs-btn secondary" href="{{ url_for('prototype.entry') }}">Start RewindSec 2.0</a>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

@@ -3,9 +3,14 @@
    Sign out is a POST form with a CSRF token, never a GET link. #}
 {% block nav %}
   <a href="{{ url_for('index') }}">Home</a>
-  <a href="{{ url_for('training.home') }}">Training</a>
-  <a href="{{ url_for('dashboard') }}">Instructor console</a>
-  <a href="{{ url_for('study.admin') }}">Study ops</a>
+  {% if config.get('LEGACY_V1_SURFACES_ENABLED') %}
+    <a href="{{ url_for('training.home') }}">Training</a>
+    <a href="{{ url_for('dashboard') }}">Instructor console</a>
+    <a href="{{ url_for('study.admin') }}">Study ops</a>
+  {% else %}
+    <a href="{{ url_for('prototype.entry') }}">Training</a>
+    <a href="{{ url_for('prototype.trainer') }}">Instructor console</a>
+  {% endif %}
   <form class="rs-nav-signout" method="post" action="{{ url_for('instructor_logout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit" class="rs-link-btn">Sign out</button>

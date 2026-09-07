@@ -42,7 +42,6 @@ PROTOTYPE_STATIC = REPO_ROOT / "static" / "prototype"
 # ===========================================================================
 
 LEARNER_ROUTES = [
-    "/prototype/",
     "/prototype/start",
     "/prototype/workstation",
     "/prototype/results",
@@ -70,6 +69,12 @@ def test_learner_prototype_routes_render(client, path):
     response = client.get(path)
     assert response.status_code == 200, path
     assert b"prototype/base.css" in response.data, path
+
+
+def test_prefixed_product_root_redirects_to_start(client):
+    response = client.get("/prototype/")
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/prototype/start")
 
 
 @pytest.mark.parametrize("path", TRAINER_ROUTES)
@@ -787,7 +792,12 @@ def test_prototype_assets_live_only_under_the_prototype_directories():
     # cannot break a v1 page.
     for path in (REPO_ROOT / "templates").glob("*.html"):
         source = path.read_text(encoding="utf-8")
-        assert "prototype/" not in source, path.name
+        if path.name == "instructor_login.html":
+            # Login is now part of the 2.0 trainer product, while keeping the
+            # existing authentication/session implementation in app.py.
+            assert 'extends "prototype/_base.html"' in source
+        else:
+            assert "prototype/" not in source, path.name
 
 
 def test_the_prototype_does_not_reuse_the_v1_stylesheet(client):
@@ -802,7 +812,7 @@ def test_the_prototype_does_not_reuse_the_v1_stylesheet(client):
 
 V1_ROUTES = [
     "/", "/training", "/training/phishing", "/training/ransomware",
-    "/training/mfa", "/training/bec", "/resources", "/instructor/login",
+    "/training/mfa", "/training/bec", "/resources",
 ]
 
 
@@ -910,33 +920,35 @@ from rewindsec.prototype import routes as prototype_routes  # noqa: E402
 INTEGRITY_JS = PROTOTYPE_STATIC / "integrity.js"
 INTEGRITY_CSS = PROTOTYPE_STATIC / "integrity.css"
 
-#: Surfaces a learner sits in front of. Deliberately not "/prototype/": that
-#: page is the reviewer's entry point, a description of the prototype rather
-#: than part of a session.
+#: The active exercise surface. Clipboard restrictions do not belong on
+#: enrollment or results pages, where ordinary browser behaviour is expected.
 LEARNER_INTEGRITY_ROUTES = [
-    "/prototype/start",
     "/prototype/workstation",
-    "/prototype/results",
 ]
 
 
 @pytest.mark.parametrize("path", LEARNER_INTEGRITY_ROUTES)
 def test_learner_surfaces_load_the_integrity_controller(client, path):
     body = client.get(path).data.decode()
-    assert 'data-integrity="learner"' in body, path
+    assert 'data-integrity="simulation"' in body, path
     assert "prototype/integrity.js" in body, path
     assert "prototype/integrity.css" in body, path
 
 
-def test_the_prototype_home_page_is_not_a_learner_surface(client):
-    """Documentation about the prototype, not a session surface.
+@pytest.mark.parametrize("path", ["/prototype/start", "/prototype/results"])
+def test_ordinary_learner_forms_do_not_load_clipboard_restrictions(client,
+                                                                    path):
+    body = client.get(path).data.decode()
+    assert 'data-integrity="none"' in body, path
+    assert "prototype/integrity.js" not in body, path
+    assert "prototype/integrity.css" not in body, path
 
-    Restricting the clipboard on the page that explains the prototype would be
-    friction with no integrity argument behind it.
-    """
-    body = client.get("/prototype/").data.decode()
-    assert 'data-integrity="none"' in body
-    assert "prototype/integrity.js" not in body
+
+def test_the_prefixed_root_canonicalizes_without_loading_integrity_assets(client):
+    response = client.get("/prototype/")
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/prototype/start")
+    assert "prototype/integrity.js" not in response.data.decode()
 
 
 @pytest.mark.parametrize("path", TRAINER_ROUTES)
@@ -952,9 +964,7 @@ def test_trainer_surfaces_carry_no_learner_clipboard_restriction(flask_app, path
 def test_the_learner_scope_is_decided_by_the_server(flask_app):
     """One list, in Python, rather than a marker each template must remember."""
     assert prototype_routes.LEARNER_ENDPOINTS == frozenset({
-        "prototype.entry",
         "prototype.workstation",
-        "prototype.results",
     })
     for endpoint in prototype_routes.LEARNER_ENDPOINTS:
         assert endpoint in flask_app.view_functions, endpoint
@@ -1171,8 +1181,11 @@ def test_the_integrity_controls_are_the_same_in_every_mode():
     behaved differently between modes would make the workspace unpredictable.
     """
     source = integrity_source().lower()
-    for mode_word in ("practice", "simulation", "assessment", "s.flags",
-                      "world.modes"):
+    # ``simulation`` names the server-owned integrity scope, not the selected
+    # learner mode. The controller has no branch on practice/simulation/
+    # assessment state and therefore behaves identically inside a workstation.
+    for mode_word in ("practice", "assessment", "s.flags", "world.modes",
+                      "mode ===", "mode =="):
         assert mode_word not in source, mode_word
 
 

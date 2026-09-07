@@ -103,7 +103,7 @@
             </div>
             {% endif %}
           </td>
-          <td class="pw-xsmall pw-muted">{{ row.profile or '—' }}</td>
+          <td class="pw-xsmall pw-muted">{{ row.profile.split(' · ')[0] if row.profile else '—' }}</td>
           <td>
             {% if not row.readable %}
               <span class="pw-chip is-caution">Unreadable</span>
@@ -150,10 +150,7 @@
   <div class="pw-grid is-3">
     {% for metric in view.metrics %}
     <div class="pw-card">
-      <div class="pw-row is-between" style="align-items:baseline">
-        <b class="pw-small">{{ metric.label }}</b>
-        <span class="pw-chip">{{ metric.metric_version }}</span>
-      </div>
+      <b class="pw-small">{{ metric.label }}</b>
       <div class="pw-metric-value" style="font-size:1.5rem">{{ metric.display }}</div>
       {% if metric.available %}
       <p class="pw-xsmall pw-muted" style="margin-top:.2rem">
@@ -174,11 +171,8 @@
 
 <section class="pw-section">
   <div class="pw-tr-scope">
-    <b>Out of scope for this console by design.</b> The organisation profile,
-    threat-family probabilities, event sequencing, a learner's difficulty and
-    a learner's self-directed focus are system-managed. There is no control
-    for any of them here, and adding one would be an architecture change
-    rather than a feature.
+    <b>Training configuration is system-managed.</b> Organisation settings,
+    event sequencing and learner session choices cannot be changed here.
   </div>
 </section>
 {% endblock %}

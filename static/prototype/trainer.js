@@ -111,7 +111,7 @@
       }
       newStudentButton.disabled = true;
       say(status, 'Saving…');
-      post('/prototype/api/trainer/students', {
+      post('/api/trainer/students', {
         display_name: name,
         reference: qs('#pw-new-student-ref').value.trim() || null,
         cohort: qs('#pw-new-student-cohort').value.trim() || null
@@ -145,7 +145,7 @@
       }
       newGroupButton.disabled = true;
       say(status, 'Saving…');
-      post('/prototype/api/trainer/groups', {
+      post('/api/trainer/groups', {
         name: name,
         description: qs('#pw-new-group-desc').value.trim() || null
       }).then(function (result) {
@@ -174,7 +174,7 @@
         if (!select || !select.value) { return; }
         addButton.disabled = true;
         say(memberStatus, 'Adding…');
-        post('/prototype/api/trainer/groups/' + encodeURIComponent(groupId)
+        post('/api/trainer/groups/' + encodeURIComponent(groupId)
              + '/members', { student_id: select.value })
           .then(function (result) {
             addButton.disabled = false;
@@ -195,7 +195,7 @@
       document.querySelectorAll('.pw-member-remove'), function (button) {
         button.addEventListener('click', function () {
           button.disabled = true;
-          post('/prototype/api/trainer/groups/' + encodeURIComponent(groupId)
+          post('/api/trainer/groups/' + encodeURIComponent(groupId)
                + '/members/remove',
                { student_id: button.getAttribute('data-student-id') })
             .then(function (result) {
@@ -280,7 +280,7 @@
     var names = duplicates.map(function (entry) {
       return entry.student.name;
     }).join(', ');
-    dupLead.textContent = names + ' already receive“' +
+    dupLead.textContent = names + ' already receive “' +
       selectedText(assessmentSelect) + '”. Assigning it again will not '
       + 'replace the route they already have.';
 
@@ -289,8 +289,7 @@
         return '<li>' + esc(source.label)
           + (source.created ? ' — created ' + esc(source.created) : '')
           + (source.created_by ? ' by ' + esc(source.created_by) : '')
-          + ' <span class="pw-muted">(' + esc(source.assignment_id)
-          + ')</span></li>';
+          + '</li>';
       }).join('');
       return '<li><b>' + esc(entry.student.name) + '</b><ul>' + rows
         + '</ul></li>';
@@ -342,7 +341,7 @@
   function submitAssignment(target, confirmDuplicate, requestId) {
     assignButton.disabled = true;
     say(status, confirmDuplicate ? 'Assigning again…' : 'Assigning…');
-    post('/prototype/api/trainer/assignments', {
+    post('/api/trainer/assignments', {
       assessment_id: assessmentSelect.value,
       target_type: target.type,
       target_id: target.id,
@@ -370,8 +369,7 @@
         return;
       }
       appendLog('“' + selectedText(assessmentSelect) + '” assigned to '
-        + target.label + ' (' + assignment.source + ', '
-        + assignment.id + ')'
+        + target.label + ' (' + assignment.source + ')'
         + (assignment.confirmed_duplicate
             ? ' — kept separately from the existing route.' : '.'));
       say(status, 'Assigned to ' + target.label
@@ -443,7 +441,7 @@
 
       createButton.disabled = true;
       say(newStatus, 'Saving…');
-      post('/prototype/api/trainer/assessments', {
+      post('/api/trainer/assessments', {
         name: name,
         focus: focusField.value,
         required_interactions: interactions,
@@ -468,7 +466,7 @@
   // Exposed for the console's own smoke checks. Reads only.
   window.rewindsecTrainer = {
     assignmentSources: function (assessmentId, studentId) {
-      return get('/prototype/api/trainer/assignment-sources?assessment_id='
+      return get('/api/trainer/assignment-sources?assessment_id='
         + encodeURIComponent(assessmentId) + '&student_id='
         + encodeURIComponent(studentId));
     }

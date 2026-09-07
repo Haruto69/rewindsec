@@ -17,7 +17,7 @@
      Rendered here rather than fetched from an endpoint: an endpoint
      that hands out CSRF tokens is a hole in the protection it serves. #}
   <meta name="csrf-token" content="{{ csrf_token() }}">
-  <title>{% block title %}RewindSec 2.0 prototype{% endblock %}</title>
+  <title>{% block title %}RewindSec{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,{{ '<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\'><rect width=\'24\' height=\'24\' rx=\'5\' fill=\'%232c5c8a\'/><path d=\'M6 17.5L12 6l6 11.5\' fill=\'none\' stroke=\'white\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/></svg>'|urlencode }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='prototype/base.css') }}">
   {# Learner integrity controls (clipboard restriction + screenshot notice).
@@ -25,7 +25,7 @@
      ``LEARNER_ENDPOINTS`` in rewindsec/prototype/routes.py -- so a trainer
      screen cannot pick the restriction up by accident, and a learner screen
      cannot lose it by omission in a template. #}
-  {% if integrity_scope|default('none') == 'learner' %}
+  {% if integrity_scope|default('none') == 'simulation' %}
   <link rel="stylesheet" href="{{ url_for('static', filename='prototype/integrity.css') }}">
   {% endif %}
   {% block styles %}{% endblock %}
@@ -36,12 +36,7 @@
 
   {% include "prototype/_icons.html" %}
 
-  {% block banner %}
-  <div class="pw-protobanner" role="note">
-    <strong>Prototype</strong>
-    <span>{{ prototype_banner }}</span>
-  </div>
-  {% endblock %}
+  {% block banner %}{% endblock %}
 
   {% block body %}{% endblock %}
 
@@ -51,7 +46,7 @@
      must be listening before the first thing a learner can interact with is
      drawn. It attaches to the document, not to individual fields, so nothing
      rendered later needs to know about it. #}
-  {% if integrity_scope|default('none') == 'learner' %}
+  {% if integrity_scope|default('none') == 'simulation' %}
   <script src="{{ url_for('static', filename='prototype/integrity.js') }}"></script>
   {% endif %}
 

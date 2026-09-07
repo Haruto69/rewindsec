@@ -99,7 +99,7 @@ def test_trainer_api_rejects_an_impossible_required_count(flask_app):
 def test_trainer_pages_require_authorization(client, path):
     response = client.get(path)
     assert response.status_code in (302, 303), response.status_code
-    assert "/instructor/login" in response.headers["Location"]
+    assert "/trainer/login" in response.headers["Location"]
 
 
 @pytest.mark.parametrize("path", TRAINER_APIS)

@@ -113,11 +113,11 @@
      * it actually means: the explicit new-session operation, which completes
      * the current attempt on the record and then opens the next one. */
     function go(focus, mode) {
-      return host.request('/prototype/api/session/new', {
+      return host.request('/api/session/new', {
         method: 'POST',
         body: { focus: focus, mode: mode }
       }).then(function () {
-        window.location.href = '/prototype/workstation?focus='
+        window.location.href = '/workstation?focus='
           + encodeURIComponent(focus) + '&mode=' + encodeURIComponent(mode);
       });
     }
@@ -146,7 +146,7 @@
     var next = document.getElementById('pw-dev-next');
     if (next) {
       next.addEventListener('click', function () {
-        host.request('/prototype/api/dev/deliver-next',
+        host.request('/api/dev/deliver-next',
                      { method: 'POST', body: {} }).then(host.adopt);
       });
     }
@@ -158,7 +158,7 @@
         function step() {
           if (remaining <= 0) { return; }
           remaining -= 1;
-          host.request('/prototype/api/dev/deliver-next',
+          host.request('/api/dev/deliver-next',
                        { method: 'POST', body: {} }).then(host.adopt).then(step);
         }
         step();
@@ -169,7 +169,7 @@
     for (var i = 0; i < advances.length; i += 1) {
       (function (button) {
         button.addEventListener('click', function () {
-          host.request('/prototype/api/dev/advance', {
+          host.request('/api/dev/advance', {
             method: 'POST',
             body: { milliseconds: Number(button.getAttribute('data-dev-advance')) }
           }).then(host.adopt);

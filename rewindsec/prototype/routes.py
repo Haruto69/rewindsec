@@ -32,7 +32,7 @@ deterministic core, or any v1 module.
 """
 
 from flask import (Blueprint, abort, jsonify, redirect, render_template,
-                   request, session)
+                   request, session, url_for)
 
 from rewindsec.management import assessment_policy
 from rewindsec.management import projection as trainer_view
@@ -43,24 +43,19 @@ from rewindsec.prototype.trainer_api import register_trainer_api
 
 #: Endpoints a learner actually sits in front of during a session.
 #:
-#: The learner integrity controls (clipboard restriction, screenshot notice,
-#: display-capture policy) are attached from here rather than from a template,
-#: so the scope is one list in one place and a new screen has to be added to it
-#: deliberately. The trainer console and the fixture API are not on it, and
-#: neither is ``/prototype/`` itself: that page is the reviewer's entry point
-#: to the prototype -- a description of the thing, not the thing -- and
-#: restricting the clipboard on documentation would be pure friction.
-LEARNER_ENDPOINTS = frozenset({
-    "prototype.entry",
-    "prototype.workstation",
-    "prototype.results",
-})
+#: The active-simulation integrity controls (clipboard restriction, screenshot
+#: notice and display-capture policy) are attached from here rather than from a
+#: template. Enrollment, results and trainer pages retain ordinary clipboard
+#: behaviour; a new restricted screen must be added deliberately.
+LEARNER_ENDPOINTS = frozenset({"prototype.workstation"})
 
 
 def create_prototype_blueprint(service_factory=None, updates=None,
                                management_factory=None,
-                               require_trainer=None):
-    """Build the ``/prototype`` blueprint.
+                               require_trainer=None,
+                               development_tools=True,
+                               url_prefix="/prototype"):
+    """Build the RewindSec 2.0 product blueprint.
 
     A factory rather than a module-level object so the application decides
     when -- and whether -- these surfaces exist at all.
@@ -84,66 +79,32 @@ def create_prototype_blueprint(service_factory=None, updates=None,
     the same posture ``security.instructor_auth_configured`` already takes for
     the v1 dashboard.
     """
-    bp = Blueprint("prototype", __name__, url_prefix="/prototype")
+    bp = Blueprint("prototype", __name__, url_prefix=url_prefix)
 
     if require_trainer is None:
         require_trainer = _refuse_all
 
     if service_factory is not None:
-        register_workstation_api(bp, service_factory, updates,
-                                 management_factory=management_factory)
+        register_workstation_api(
+            bp, service_factory, updates,
+            management_factory=management_factory,
+            development_tools=development_tools)
 
     if management_factory is not None:
         register_trainer_api(bp, management_factory, require_trainer)
 
     # -- shared template context ------------------------------------------
 
-    #: What each screen is actually backed by, stated on the screen itself.
-    #:
-    #: Batch 2 made the learner workstation real, and left the trainer console
-    #: and the numeric part of the debrief as authored demonstrations. One
-    #: banner saying "prototype" everywhere would now be wrong in one
-    #: direction on the workstation and right in the other on the trainer, so
-    #: it says which is which. A reviewer must never have to guess whether
-    #: what they are looking at is implemented.
-    BANNERS = {
-        "workstation": (
-            "RewindSec 2.0 — this workstation runs on a real persisted "
-            "simulation session, driven by the training engine and scored by "
-            "the RewindSec 2.0 rubric when it ends."),
-        "results": (
-            "The timeline, decisions, consequence chains, evidence and the six "
-            "dimension scores on this page all come from your real session, "
-            "scored once by the RewindSec 2.0 rubric when it ended."),
-        "trainer": (
-            "Trainer console — real persisted RewindSec 2.0 records. Students, "
-            "groups, assessments, assignments, attempts and results are "
-            "stored; every analytics figure is derived from stored sessions, "
-            "and a figure that cannot be derived is shown as unavailable "
-            "rather than estimated."),
-        "entry": (
-            "RewindSec 2.0. Entering the workstation creates a real, "
-            "persisted training session you can leave and come back to."),
-    }
-
-    def _banner_for(endpoint):
-        if endpoint == "prototype.workstation":
-            return BANNERS["workstation"]
-        if endpoint == "prototype.results":
-            return BANNERS["results"]
-        if endpoint == "prototype.entry":
-            return BANNERS["entry"]
-        return BANNERS["trainer"]
-
     @bp.context_processor
-    def _prototype_context():
+    def _product_context():
         """Values every template under this blueprint needs."""
         return {
-            "prototype_banner": _banner_for(request.endpoint),
             "org": fixtures.world.ORGANIZATION,
             "learner": fixtures.world.LEARNER,
             "integrity_scope": (
-                "learner" if request.endpoint in LEARNER_ENDPOINTS else "none"),
+                "simulation" if request.endpoint in LEARNER_ENDPOINTS
+                else "none"),
+            "development_tools_enabled": bool(development_tools),
         }
 
     # -- learner integrity controls ---------------------------------------
@@ -170,10 +131,8 @@ def create_prototype_blueprint(service_factory=None, updates=None,
 
     @bp.route("/")
     def index():
-        """Entry point for the manual product review."""
-        return render_template(
-            "prototype/index.html",
-            safety=fixtures.safety_report())
+        """Keep the product root focused on starting a real session."""
+        return redirect(url_for("prototype.entry"))
 
     @bp.route("/start")
     def entry():
@@ -222,8 +181,8 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         """Learner debrief.
 
         The page is rendered from the run state the workstation left in
-        ``sessionStorage``. Opened directly, it falls back to a representative
-        fixture session so the screen is always reviewable.
+        ``sessionStorage``. Opened directly, it presents an honest empty state
+        and directs the learner to start training.
         """
         return render_template(
             "prototype/results.html",
@@ -354,7 +313,7 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         if management_factory is None:
             abort(503)
         return redirect(
-            "/prototype/api/trainer/assignment-sources?%s"
+            "/api/trainer/assignment-sources?%s"
             % request.query_string.decode("ascii", "ignore"), code=307)
 
     return bp

@@ -16,20 +16,13 @@
         <span>Session debrief</span>
       </span>
     </span>
-    <nav class="pw-frame-nav" aria-label="Prototype sections">
+    <nav class="pw-frame-nav" aria-label="RewindSec navigation">
       <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.entry') }}">New session</a>
-      <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.index') }}">Prototype home</a>
     </nav>
   </div>
 </header>
 
 <main class="pw-results" id="pw-main">
-
-  <div class="pw-note is-caution" style="margin-bottom:1.4rem" role="note">
-    Every number on this page is prototype demonstration data produced by a
-    fixture, not a measurement. There is no scoring engine behind it, the
-    weights are placeholders, and none of it may be cited as a result.
-  </div>
 
   <section class="pw-results-hero">
     <div>
@@ -40,7 +33,7 @@
     </div>
     <div class="pw-overall">
       <div class="pw-overall-num"><span id="pw-res-overall">—</span><small>/100</small></div>
-      <div class="pw-overall-label">Overall · prototype figure</div>
+      <div class="pw-overall-label">Overall score</div>
     </div>
   </section>
 
@@ -111,20 +104,19 @@
   <div class="pw-results-actions">
     <a class="pw-btn is-primary" id="pw-res-retry" href="#">Retry the same simulation</a>
     <a class="pw-btn" href="{{ url_for('prototype.entry') }}">Start a new simulation</a>
-    <span class="pw-spacer"></span>
-    <span class="pw-small pw-muted" style="max-width:38ch">
-      In production, Retry reuses the same seed and Start new draws a new one.
-      Neither is implemented here.
-    </span>
   </div>
 </main>
 {% endblock %}
 
 {% block dev_panel %}
+{% if development_tools_enabled %}
 {% include "prototype/_dev_panel.html" %}
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
+{% if development_tools_enabled %}
 <script src="{{ url_for('static', filename='prototype/dev-panel.js') }}" defer></script>
+{% endif %}
 <script src="{{ url_for('static', filename='prototype/results.js') }}" defer></script>
 {% endblock %}

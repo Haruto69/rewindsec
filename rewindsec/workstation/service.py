@@ -161,11 +161,14 @@ class WorkstationService(object):
     """Server-authoritative operations on one learner's simulation session."""
 
     def __init__(self, repository, seed_source=None, id_source=None,
-                 updates=None):
+                 updates=None, sandbox=None):
         self._repository = repository
         self._seeds = seed_source or SystemSeedSource()
         self._id_source = id_source
         self._updates = updates
+        # Optional operational projection.  It is injected here (the
+        # application layer), never imported by the deterministic domain.
+        self._sandbox = sandbox
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -233,6 +236,7 @@ class WorkstationService(object):
         if on_created is not None:
             on_created(session, cause_event_id=start_event.event_id)
         self._repository.create(session)
+        self._synchronize_sandbox(session)
         return session_id
 
     def _new_session_id(self):
@@ -248,9 +252,14 @@ class WorkstationService(object):
         if not session_id:
             raise NoActiveSessionError("There is no training session open.")
         try:
-            return self._repository.load(session_id)
+            loaded = self._repository.load(session_id)
         except SessionNotFoundError:
             raise NoActiveSessionError("There is no training session open.")
+        # Reconciliation on load is the restart/resume path: a missing or stale
+        # container is rebuilt from persisted truth.  The coordinator records
+        # operational failure without changing the aggregate.
+        self._synchronize_sandbox(loaded)
+        return loaded
 
     def owns(self, session, learner_ref):
         return session.learner_ref == learner_ref
@@ -607,8 +616,38 @@ class WorkstationService(object):
         except SessionNotFoundError as exc:
             raise NoActiveSessionError(
                 "There is no training session open.") from exc
+        # Persisted simulation truth always wins.  Only after that write has
+        # succeeded may Docker mirror it; Docker latency, ids and failures can
+        # therefore consume no RNG, reorder no event, and rewrite no fact.
+        if session.is_active:
+            self._synchronize_sandbox(session)
+        else:
+            self._destroy_sandbox(session.session_id)
         if self._updates is not None:
             self._updates.publish(session.session_id, session.revision)
+
+    def _synchronize_sandbox(self, session):
+        if self._sandbox is not None and session.is_active:
+            return self._sandbox.reconcile(session)
+        return None
+
+    def _destroy_sandbox(self, session_id):
+        if self._sandbox is not None:
+            return self._sandbox.destroy(session_id)
+        return None
+
+    def sandbox_diagnostic(self, session_id, learner_ref=None):
+        """Internal operational status after proving session ownership.
+
+        This is intentionally not part of the learner projection or learner
+        HTTP API.  Tests, operators, and the validation harness can observe a
+        failed reconcile without Assessment payloads learning anything about
+        Docker or container internals.
+        """
+        session = self.require_owned(session_id, learner_ref)
+        if self._sandbox is None:
+            return {"status": "disabled", "session_key": None}
+        return self._sandbox.diagnostic(session.session_id)
 
     # -- shared helpers used by the handlers ------------------------------
 

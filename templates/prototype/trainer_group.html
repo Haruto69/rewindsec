@@ -101,7 +101,7 @@
                 <span class="pw-avatar is-neutral" aria-hidden="true">{{ row.student.initials }}</span>
                 <span>
                   <a href="{{ url_for('prototype.trainer_student', student_id=row.student.student_id) }}">{{ row.student.display_name }}</a>
-                  <div class="pw-xsmall pw-muted">{{ row.student.reference or row.student.student_id }}</div>
+                  <div class="pw-xsmall pw-muted">{{ row.student.reference or 'No reference supplied' }}</div>
                 </span>
               </span>
             </td>
