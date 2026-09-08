@@ -210,6 +210,16 @@ def _seed_mail(session, delivered_arrivals, start_event_id):
             "replied": False,
             "order": message.get("order", 0),
             "received": message.get("received", ""),
+            # Messages present at session start were all "delivered" at the
+            # same simulation instant, so the display order among them falls
+            # back to the authored content position (``delivery_seq``) as a
+            # deterministic tie-break -- see
+            # ``rewindsec.workstation.projection._mail_delivery_order``. Any
+            # message delivered later via ``worldops.deliver_mail`` gets a
+            # strictly later ``delivered_at_ms`` and always sorts above the
+            # opening batch, which is the whole point of this fix.
+            "delivered_at_ms": session.now_ms if delivered else None,
+            "delivery_seq": message.get("order", 0) if delivered else None,
         }, cause_event_id=start_event_id if delivered else None)
         _introduce_mail_facts(session, message, available=delivered,
                               event_id=start_event_id if delivered else None)

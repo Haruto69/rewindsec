@@ -123,6 +123,8 @@ _ACTION_LABELS = {
     "mail.open_link": ("action", "Followed a link from a message"),
     "mail.report": ("decision", "Reported a message"),
     "mail.delete": ("decision", "Deleted a message"),
+    "mail.restore": ("action", "Restored message"),
+    "mail.delete_permanently": ("action", "Permanently deleted message"),
     "mail.forward": ("action", "Forwarded a message"),
     "mail.reply": ("decision", "Replied to a message"),
     "mail.download_attachment": ("decision", "Downloaded an attachment"),

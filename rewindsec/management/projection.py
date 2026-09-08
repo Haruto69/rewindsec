@@ -129,6 +129,8 @@ _ACTION_PRESENTATION = {
     "mail.open_link": ("Mail", "Opened link"),
     "mail.report": ("Mail", "Reported mail"),
     "mail.delete": ("Mail", "Deleted mail"),
+    "mail.restore": ("Mail", "Restored message"),
+    "mail.delete_permanently": ("Mail", "Permanently deleted message"),
     "mail.forward": ("Mail", "Forwarded mail"),
     "mail.reply": ("Mail", "Replied to mail"),
     "mail.download_attachment": ("Mail", "Downloaded attachment"),

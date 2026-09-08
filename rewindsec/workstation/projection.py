@@ -157,6 +157,22 @@ def _learner_view():
 # Mail
 # ---------------------------------------------------------------------------
 
+def _mail_delivery_order(ms, seq):
+    """Deterministic sort key: newest delivery first, stable tie-break.
+
+    ``ms`` is the SimClock integer-millisecond delivery time and ``seq`` is
+    the persisted, world-owned ``mail_delivery_seq`` counter allocated at the
+    moment of delivery (see :func:`rewindsec.workstation.worldops.deliver_mail`
+    and :func:`~rewindsec.workstation.worldops.add_sent_mail`). Packing them
+    into one integer keeps the sort a single deterministic key derived only
+    from simulation-owned state -- never wall-clock time, dict iteration
+    order, or Python ``hash()`` -- and two messages delivered in the same
+    millisecond still resolve to a fixed, resume-stable order because ``seq``
+    is monotonic and persisted, not re-derived.
+    """
+    return (int(ms or 0) * 1000000) + int(seq or 0)
+
+
 def _mail_view(session):
     messages = []
     for mail_id, state in sorted(session.world.get_component(NS_MAIL).items()):
@@ -165,6 +181,13 @@ def _mail_view(session):
             # day is concerned it has not happened yet, and putting it in the
             # document with a flag would let a curious client read tomorrow's
             # post.
+            continue
+        if state.get("permanently_deleted"):
+            # Permanently deleted (``mail.delete_permanently``) -- unlike a
+            # message merely moved to the Deleted folder, this one no longer
+            # appears anywhere in the projection. Its history/decision/
+            # scoring records are untouched underneath; only the projection
+            # stops showing it.
             continue
         record = ix.MAIL_BY_ID.get(mail_id)
         if record is None:
@@ -180,7 +203,8 @@ def _mail_view(session):
             "reported": False,
             "forwarded": False,
             "replied": False,
-            "order": state.get("order", 900),
+            "order": _mail_delivery_order(state.get("sent_at_ms"),
+                                          state.get("delivery_seq")),
             "received": state.get("received", ""),
             "subject": state.get("subject", ""),
             "from_name": content_world.LEARNER["name"],
@@ -211,7 +235,13 @@ def _message_view(session, mail_id, state, record):
         "reported": bool(state.get("reported")),
         "forwarded": bool(state.get("forwarded")),
         "replied": bool(state.get("replied")),
-        "order": state.get("order", 0),
+        # Sort key: real delivery chronology, not the authored
+        # content-position field (``state["order"]``, kept only for
+        # authoring/debugging and never used for display order). See
+        # ``_mail_delivery_order`` for why this must be the persisted
+        # ``delivered_at_ms``/``delivery_seq`` pair and nothing else.
+        "order": _mail_delivery_order(state.get("delivered_at_ms"),
+                                      state.get("delivery_seq")),
         "received": state.get("received", ""),
         # Shown the moment a message is opened, exactly as a mail client
         # does. ``subject_override``/``from_name_override`` are a
@@ -319,6 +349,13 @@ def _files_view(session):
             # says so on its own attachment card before it is downloaded, and
             # a legitimate one would say the same.
             "macro": bool(state.get("macro")),
+            # Presentation-only "unseen download" flag, kept separate from
+            # ``state`` (readability/security). Legacy v2.0.1 sessions never
+            # wrote ``is_new`` at all -- they only ever set
+            # ``state="downloaded"`` -- so an absent field falls back to that
+            # old convention rather than requiring a migration.
+            "is_new": bool(state["is_new"]) if "is_new" in state
+                      else (state.get("state") == "downloaded"),
             # The structured synthetic document, if this file is bound to
             # one -- absent until the learner opens it (``files.open`` marks
             # the fact observed), and absent forever if the file has no bound

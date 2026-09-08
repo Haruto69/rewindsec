@@ -836,8 +836,18 @@ class WorkstationService(object):
 
 
 def _require_delivered_mail(session, mail_id):
+    """Resolve a learner-facing mail target.
+
+    A permanently-deleted message (``mail.delete_permanently``) is refused
+    here just like an undelivered or unknown one: it is gone from every
+    normal mail operation -- open, report, reply, forward, delete, restore --
+    even though its history/decision/scoring records are still sitting in the
+    world underneath it. Narrower helpers that legitimately need the record
+    of a purged message (debrief, restore's own precondition check) read the
+    world directly rather than going through this gate.
+    """
     state = session.world.get(NS_MAIL, mail_id)
-    if state is None or not state.get("delivered"):
+    if state is None or not state.get("delivered") or state.get("permanently_deleted"):
         raise UnknownTargetError("No such message.")
     record = ix.MAIL_BY_ID.get(mail_id)
     if record is None:
@@ -924,14 +934,87 @@ def _mail_report(service, session, action, learner_action, mode_flags):
 
 
 def _mail_delete(service, session, action, learner_action, mode_flags):
-    _require_delivered_mail(session, action.target)
-    worldops.set_mail_field(session, action.target, folder="deleted",
-                            unread=False)
+    """Move a message to Deleted.
+
+    Repeating this on a message already in Deleted is a clean no-op: nothing
+    about its state (including ``deleted_from_folder``, the one place the
+    message can be restored *to*) is allowed to change on a second delete,
+    or a learner who deletes twice would lose the ability to restore to the
+    right folder.
+    """
+    state, _record = _require_delivered_mail(session, action.target)
+    if state.get("folder") == "deleted":
+        return None
+    worldops.set_mail_field(
+        session, action.target, folder="deleted", unread=False,
+        # Recorded once, on the transition *into* Deleted, so
+        # ``mail.restore`` always has the folder the message actually came
+        # from -- never overwritten by a later delete while already deleted
+        # (that case returns above and never reaches here).
+        deleted_from_folder=state.get("folder", "inbox"))
     service._mark_resolved(session, action.target)
     decision_id = _DELETE_DECISION.get(action.target)
     if decision_id and ix.is_hostile_mail(action.target):
         return service._decide(session, decision_id, learner_action,
                                "Mail", mode_flags)
+    return None
+
+
+#: Folders ``mail.restore`` may legitimately hand a message back to. A
+#: legacy session's ``deleted_from_folder`` (or one somehow missing) falls
+#: back to "inbox" rather than trusting an unrecognised value.
+_RESTORABLE_FOLDERS = frozenset({"inbox", "archive", "reported"})
+
+
+def _mail_restore(service, session, action, learner_action, mode_flags):
+    """Move a message out of Deleted and back to where it was deleted from.
+
+    Only meaningful for a message that is actually in Deleted -- restoring a
+    message from any other folder is not a thing a mail client offers, so a
+    client that sends this for an inbox message is refused rather than
+    silently accepted. A permanently-deleted message is rejected the same
+    way every other learner-facing mail op rejects it, by
+    ``_require_delivered_mail``.
+
+    This is explicitly not a rewind: it never touches history, decisions, or
+    scoring evidence, and it never reopens a scoring opportunity -- it only
+    ever changes ``folder`` (and, for a legacy message that predates
+    ``unread``/``read`` tracking being restore-safe, nothing at all about
+    those). Read/unread state, reported/replied/forwarded flags, delivery
+    time, and occurrence identity all pass through untouched.
+    """
+    state, _record = _require_delivered_mail(session, action.target)
+    if state.get("folder") != "deleted":
+        raise InvalidRequestError("Only a deleted message can be restored.")
+    destination = state.get("deleted_from_folder")
+    if destination not in _RESTORABLE_FOLDERS:
+        destination = "inbox"
+    worldops.set_mail_field(session, action.target, folder=destination)
+    return None
+
+
+def _mail_delete_permanently(service, session, action, learner_action, mode_flags):
+    """Remove a message from Deleted for good.
+
+    Only meaningful for a message already in Deleted -- unlike
+    ``mail.delete`` this does not move the message to another folder, it
+    marks it ``permanently_deleted`` so the projection stops showing it
+    anywhere (see ``rewindsec.workstation.projection._mail_view``) and every
+    learner-facing mail op refuses it from then on
+    (``_require_delivered_mail``). Nothing about its LearnerAction, event,
+    decision or scoring history is touched or removed -- only the flag is
+    set. Repeating this on an already permanently-deleted message is a
+    no-op: the flag is already set, so there is nothing left to change.
+    """
+    state = session.world.get(NS_MAIL, action.target)
+    if state is None or not state.get("delivered"):
+        raise UnknownTargetError("No such message.")
+    if state.get("permanently_deleted"):
+        return None
+    if state.get("folder") != "deleted":
+        raise InvalidRequestError(
+            "Only a deleted message can be permanently deleted.")
+    worldops.set_mail_field(session, action.target, permanently_deleted=True)
     return None
 
 
@@ -1411,11 +1494,27 @@ def _files_inspect(service, session, action, learner_action, mode_flags):
 def _files_open(service, session, action, learner_action, mode_flags):
     state = _require_file(session, action.target)
     if state.get("state") == "unavailable":
+        # The learner didn't actually open/read anything -- leave the "new
+        # download" presentation flag exactly as it was.
         worldops.raise_notification(
             session, kind="file",
             title="Cannot open %s" % state.get("name", ""),
             body=state.get("note") or "The file could not be read.", opens=None)
         return None
+
+    # A real open is being attempted: clear the "new" badge deterministically,
+    # before the hostile-macro decision logic runs, so it clears on every
+    # attempted open regardless of what that logic decides. This also
+    # normalises a legacy state="downloaded" file to the current
+    # state/is_new split -- one write, no schema migration required.
+    needs_normalise = state.get("state") == "downloaded"
+    if state.get("is_new") or "is_new" not in state or needs_normalise:
+        updated = dict(state, is_new=False)
+        if needs_normalise:
+            updated["state"] = "normal"
+        session.mutate_world(NS_FILES, action.target, updated)
+        state = updated
+
     origin = state.get("origin_mail")
     if state.get("macro") and _from_hostile_origin(origin):
         decision_id = _RANSOM_OPEN_DECISION.get(origin, "d-ransom-open")
@@ -1842,6 +1941,8 @@ _HANDLERS = {
     "mail.open_link": _mail_open_link,
     "mail.report": _mail_report,
     "mail.delete": _mail_delete,
+    "mail.restore": _mail_restore,
+    "mail.delete_permanently": _mail_delete_permanently,
     "mail.forward": _mail_forward,
     "mail.reply": _mail_reply,
     "mail.download_attachment": _mail_download,

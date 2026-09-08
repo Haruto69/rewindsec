@@ -112,6 +112,14 @@ ACTION_SPECS = {spec.action_type: spec for spec in (
          params={"index": ("int", True, 64)}),
     _con("mail.report", target="message"),
     _con("mail.delete", target="message"),
+    #: Moves a message that is currently in Deleted back to Inbox. Only
+    #: meaningful from Deleted -- see ``rewindsec.workstation.service._mail_restore``.
+    _con("mail.restore", target="message"),
+    #: Removes a message from Deleted for good. Only meaningful from Deleted;
+    #: unlike ``mail.delete`` this is not reversible -- the message stops
+    #: appearing in the projection at all. See
+    #: ``rewindsec.workstation.service._mail_delete_permanently``.
+    _con("mail.delete_permanently", target="message"),
     _con("mail.forward", target="message"),
     _con("mail.reply", target="message",
          params={"text": ("str", False, MAX_REPLY_TEXT)}),

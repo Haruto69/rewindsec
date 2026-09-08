@@ -398,6 +398,7 @@
     var size = areaSize();
     Object.keys(WIN).forEach(function (appId) {
       var win = WIN[appId];
+      if (win.maximized) { fillWorkarea(win); return; }
       win.w = Math.min(win.w, Math.max(320, size.w - 24));
       win.h = Math.min(win.h, Math.max(240, size.h - 24));
       win.x = clamp(win.x, 8, Math.max(8, size.w - win.w - 8));
@@ -418,13 +419,86 @@
   }
 
   function closeApp(appId) {
-    if (WIN[appId]) { WIN[appId].open = false; }
+    var win = WIN[appId];
+    if (win) {
+      win.open = false;
+      // A closed window is a fresh start, not a paused one: reopening it
+      // (openApp's "already exists" branch) must not come back stuck
+      // maximised from whatever this instance was doing when it closed.
+      // Restoring the saved geometry here (falling back to the size/position
+      // openApp itself would have chosen, if there is none) means the next
+      // open is an ordinary window, same as opening it for the first time.
+      if (win.maximized) {
+        var prev = win.restoreGeometry;
+        win.maximized = false;
+        win.restoreGeometry = null;
+        if (prev) { win.x = prev.x; win.y = prev.y; win.w = prev.w; win.h = prev.h; }
+        else { fitDefaultGeometry(appId, win); }
+      }
+    }
     render();
   }
 
   function minimiseApp(appId) {
     if (WIN[appId]) { WIN[appId].minimized = true; }
     render();
+  }
+
+  /* Maximise/restore, entirely presentation state (see the WIN comment at the
+   * top of this file). Maximising remembers the window's pre-maximise
+   * geometry so restoring puts it back exactly where it was, and the toggle
+   * is idempotent against a resize: reflowWindows() keeps a maximised window
+   * filling the work area rather than clamping it like an ordinary window. */
+  function toggleMaximiseApp(appId) {
+    var win = WIN[appId];
+    if (!win) { return; }
+    if (win.maximized) {
+      var prev = win.restoreGeometry;
+      win.maximized = false;
+      win.restoreGeometry = null;
+      if (prev) {
+        win.x = prev.x; win.y = prev.y; win.w = prev.w; win.h = prev.h;
+      } else {
+        fitDefaultGeometry(appId, win);
+      }
+      // Clamp to the *current* work area: it may have been resized while
+      // maximised, and a saved geometry from before that resize must never
+      // be allowed to leave the restored window partly or fully offscreen.
+      var size = areaSize();
+      win.w = Math.min(win.w, Math.max(320, size.w - 24));
+      win.h = Math.min(win.h, Math.max(240, size.h - 24));
+      win.x = clamp(win.x, 8, Math.max(8, size.w - win.w - 8));
+      win.y = clamp(win.y, 8, Math.max(8, size.h - win.h - 8));
+    } else {
+      win.restoreGeometry = { x: win.x, y: win.y, w: win.w, h: win.h };
+      win.maximized = true;
+      fillWorkarea(win);
+    }
+    win.z = (zCounter += 1);
+    render();
+  }
+
+  /* A safe, centred normal-size geometry for appId, derived from its app
+   * spec and the current work area -- the same sizing openApp uses for a
+   * window that has never existed, reused wherever "maximised with nothing
+   * to restore to" needs a default instead of throwing. */
+  function fitDefaultGeometry(appId, win) {
+    var size = areaSize();
+    var spec = APPS[appId];
+    var w = Math.min(spec.w, Math.max(320, size.w - 40));
+    var h = Math.min(spec.h, Math.max(240, size.h - 40));
+    win.w = w;
+    win.h = h;
+    win.x = clamp(Math.round((size.w - w) / 2), 8, Math.max(8, size.w - w - 8));
+    win.y = clamp(Math.round((size.h - h) / 2), 8, Math.max(8, size.h - h - 8));
+  }
+
+  function fillWorkarea(win) {
+    var size = areaSize();
+    win.x = 4;
+    win.y = 4;
+    win.w = Math.max(320, size.w - 8);
+    win.h = Math.max(240, size.h - 8);
   }
 
   function focusApp(appId) {
@@ -592,6 +666,7 @@
       node.style.width = win.w + 'px';
       node.style.height = win.h + 'px';
       node.style.zIndex = win.z;
+      node.classList.toggle('is-maximized', !!win.maximized);
 
       var subtitle = windowSubtitle(appId);
       node.innerHTML = ''
@@ -602,7 +677,10 @@
         + '  </span>'
         + '  <span class="pw-winbar-ctl">'
         + '    <button type="button" class="pw-winctl" data-win-min="' + appId
-        + '" aria-label="Minimise">' + icon('minus') + '</button>'
+        + '" aria-label="Minimise">' + icon('minimise') + '</button>'
+        + '    <button type="button" class="pw-winctl" data-win-max="' + appId
+        + '" aria-label="' + (win.maximized ? 'Restore' : 'Maximise') + '">'
+        + icon(win.maximized ? 'collapse' : 'expand') + '</button>'
         + '    <button type="button" class="pw-winctl" data-win-close="' + appId
         + '" aria-label="Close">' + icon('close') + '</button>'
         + '  </span>'
@@ -836,6 +914,23 @@
         + '</div></div>';
     }
 
+    // Deleted mail gets its own pair of actions in place of Report/Delete:
+    // there is nothing to report once a message has already been removed
+    // from view, and "Delete" there would be a second, different meaning of
+    // the same word. Restore is reversible; "Delete permanently" is not, and
+    // is never the primary (is-primary) action in the row for that reason.
+    var deletedActions = ''
+      + '  <button type="button" class="pw-btn is-sm" data-mail-restore="' + esc(message.id) + '">'
+      + icon('reload', 'style="width:13px;height:13px"') + ' Restore</button>'
+      + '  <button type="button" class="pw-btn is-sm is-alert" data-mail-delete-permanent="'
+      + esc(message.id) + '">'
+      + icon('trash', 'style="width:13px;height:13px"') + ' Delete permanently</button>';
+    var activeActions = ''
+      + '  <button type="button" class="pw-btn is-sm" data-mail-report="' + esc(message.id) + '">'
+      + icon('flag', 'style="width:13px;height:13px"') + ' Report</button>'
+      + '  <button type="button" class="pw-btn is-sm" data-mail-delete="' + esc(message.id) + '">'
+      + icon('trash', 'style="width:13px;height:13px"') + ' Delete</button>';
+
     return ''
       + '<div class="pw-pane-head">'
       + '  <button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-mail-back="1">'
@@ -846,10 +941,7 @@
       + '  <button type="button" class="pw-btn is-sm is-primary" data-mail-reply="' + esc(message.id) + '">'
       + icon('reply', 'style="width:13px;height:13px"') + ' Reply</button>'
       + '  <button type="button" class="pw-btn is-sm" data-mail-forward="' + esc(message.id) + '">Forward</button>'
-      + '  <button type="button" class="pw-btn is-sm" data-mail-report="' + esc(message.id) + '">'
-      + icon('flag', 'style="width:13px;height:13px"') + ' Report</button>'
-      + '  <button type="button" class="pw-btn is-sm" data-mail-delete="' + esc(message.id) + '">'
-      + icon('trash', 'style="width:13px;height:13px"') + ' Delete</button>'
+      + (message.folder === 'deleted' ? deletedActions : activeActions)
       + '  <span class="pw-spacer"></span>'
       + '  <button type="button" class="pw-btn is-sm" data-mail-headers="'
       + esc(message.id) + '" aria-pressed="' + (state.headers ? 'true' : 'false') + '">'
@@ -1248,9 +1340,16 @@
 
     var rows = filesIn(current.id).map(function (file) {
       var unavailable = file.state === 'unavailable';
+      // "New" tracks ``is_new`` -- an unseen-download flag the server clears
+      // the moment ``files.open`` is attempted -- not ``state``, which is a
+      // readability/security value ("normal", "unavailable", ...). Reading
+      // ``state === 'downloaded'`` here would show every downloaded file as
+      // new forever, since the server normalises that legacy state value to
+      // "normal" on first open and never sets it again. See
+      // ``rewindsec.workstation.projection._files_view``.
       return '<button type="button" class="pw-filerow'
         + (unavailable ? ' is-unavailable' : '')
-        + (file.state === 'downloaded' ? ' is-new' : '')
+        + (file.is_new ? ' is-new' : '')
         + (state.selected === file.id ? ' is-active' : '') + '"'
         + ' data-file-select="' + esc(file.id) + '">'
         + icon(unavailable ? 'filex' : fileIcon(file.kind))
@@ -1259,7 +1358,7 @@
         + '<span class="pw-filerow-meta is-optional">' + esc(file.modified) + '</span>'
         + '<span class="pw-filerow-meta">'
         + (unavailable ? '<span class="pw-chip is-alert">error</span>'
-           : file.state === 'downloaded' ? '<span class="pw-chip is-accent">new</span>' : '')
+           : file.is_new ? '<span class="pw-chip is-accent">new</span>' : '')
         + '</span>'
         + '</button>';
     }).join('');
@@ -1826,7 +1925,22 @@
       var close = closestData(event.target, 'data-win-close');
       if (close) { closeApp(close.value); return; }
       var min = closestData(event.target, 'data-win-min');
-      if (min) { minimiseApp(min.value); }
+      if (min) { minimiseApp(min.value); return; }
+      var max = closestData(event.target, 'data-win-max');
+      if (max) { toggleMaximiseApp(max.value); }
+    });
+
+    // Double-clicking the title bar is the ordinary desktop shortcut for
+    // maximise/restore; it is purely a convenience on top of the button and
+    // does not go through the click handler above (a dblclick fires two
+    // click events first, and toggling on both would cancel itself out).
+    node.addEventListener('dblclick', function (event) {
+      var handle = closestData(event.target, 'data-drag');
+      if (!handle) { return; }
+      if (closestData(event.target, 'data-win-close')
+          || closestData(event.target, 'data-win-min')
+          || closestData(event.target, 'data-win-max')) { return; }
+      toggleMaximiseApp(appId);
     });
 
     var drag = null;
@@ -1834,7 +1948,13 @@
       var handle = closestData(event.target, 'data-drag');
       if (!handle || !canDrag()) { return; }
       if (closestData(event.target, 'data-win-close')
-          || closestData(event.target, 'data-win-min')) { return; }
+          || closestData(event.target, 'data-win-min')
+          || closestData(event.target, 'data-win-max')) { return; }
+      // A maximised window has no position to drag -- it fills the work
+      // area by definition, and toggling it back on a plain mousedown would
+      // fight with the title bar's double-click-to-restore gesture above.
+      // Restore it (with the button or a double-click) before dragging it.
+      if (WIN[appId] && WIN[appId].maximized) { return; }
       var win = WIN[appId];
       drag = { x: event.clientX, y: event.clientY, ox: win.x, oy: win.y };
       event.preventDefault();
@@ -1976,6 +2096,21 @@
 
     hit = closestData(event.target, 'data-mail-delete');
     if (hit) { APP.mail.selected = null; send('mail.delete', hit.value); return; }
+
+    hit = closestData(event.target, 'data-mail-restore');
+    if (hit) { APP.mail.selected = null; send('mail.restore', hit.value); return; }
+
+    hit = closestData(event.target, 'data-mail-delete-permanent');
+    if (hit) {
+      var permanentId = hit.value;
+      confirmDialog('Delete this message permanently?',
+        'This removes it from the mailbox. It cannot be restored.',
+        function () {
+          APP.mail.selected = null;
+          send('mail.delete_permanently', permanentId);
+        });
+      return;
+    }
 
     // -- browser ------------------------------------------------------------
     hit = closestData(event.target, 'data-tab-close');

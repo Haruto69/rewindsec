@@ -157,6 +157,152 @@ def test_mail_delete_moves_the_message_without_destroying_it(driver):
     assert entry["folder"] == "deleted"
 
 
+def test_mail_restore_moves_a_deleted_message_back_to_inbox(driver):
+    driver.act("mail.delete", "m-benefits")
+    driver.act("mail.restore", "m-benefits")
+    entry = message(driver.snapshot(), "m-benefits")
+    assert entry["folder"] == "inbox"
+
+
+def test_mail_restore_refuses_a_message_that_is_not_deleted(driver):
+    with pytest.raises(InvalidRequestError):
+        driver.act("mail.restore", "m-benefits")
+
+
+def test_mail_delete_permanently_refuses_a_message_that_is_not_deleted(driver):
+    with pytest.raises(InvalidRequestError):
+        driver.act("mail.delete_permanently", "m-benefits")
+
+
+def test_mail_delete_permanently_removes_the_message_from_the_projection(driver):
+    driver.act("mail.delete", "m-benefits")
+    assert message(driver.snapshot(), "m-benefits") is not None
+
+    driver.act("mail.delete_permanently", "m-benefits")
+    assert message(driver.snapshot(), "m-benefits") is None
+
+
+def test_mail_delete_permanently_refuses_an_undelivered_message(driver):
+    with pytest.raises(UnknownTargetError):
+        driver.act("mail.delete_permanently", "m-payroll-restructure")
+
+
+def test_mail_delete_records_the_original_folder_on_first_delete(driver):
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    driver.act("mail.delete", "m-payroll-restructure")
+    session = driver.session()
+    assert session.world.get("mail", "m-payroll-restructure")["deleted_from_folder"] == "reported"
+
+
+def test_repeated_delete_does_not_overwrite_the_recorded_origin(driver):
+    """A second delete-while-deleted must be a no-op, not a fresh capture."""
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    driver.act("mail.delete", "m-payroll-restructure")
+    revision_before = driver.revision
+    driver.act("mail.delete", "m-payroll-restructure")
+    session = driver.session()
+    assert session.world.get("mail", "m-payroll-restructure")["deleted_from_folder"] == "reported"
+    # Nothing changed, so nothing new was written to the world.
+    assert driver.revision == revision_before + 1  # the action itself still logs
+
+
+def test_mail_restore_returns_a_reported_message_to_reported(driver):
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    driver.act("mail.delete", "m-payroll-restructure")
+    driver.act("mail.restore", "m-payroll-restructure")
+    entry = message(driver.snapshot(), "m-payroll-restructure")
+    assert entry["folder"] == "reported"
+
+
+def test_mail_restore_falls_back_to_inbox_for_a_legacy_session(driver):
+    """A session that predates ``deleted_from_folder`` restores to Inbox."""
+    driver.act("mail.delete", "m-benefits")
+    session = driver.session()
+    expected = session.revision
+    state = dict(session.world.get("mail", "m-benefits"))
+    del state["deleted_from_folder"]
+    session.mutate_world("mail", "m-benefits", state)
+    driver.service._save(session, expected)
+    driver.act("mail.restore", "m-benefits")
+    assert message(driver.snapshot(), "m-benefits")["folder"] == "inbox"
+
+
+def test_mail_restore_preserves_read_state(driver):
+    driver.act("mail.open", "m-benefits")
+    driver.act("mail.delete", "m-benefits")
+    driver.act("mail.restore", "m-benefits")
+    entry = message(driver.snapshot(), "m-benefits")
+    assert entry["read"] is True
+    assert entry["unread"] is False
+
+
+def test_mail_restore_does_not_touch_history_or_decisions(driver):
+    """Restore is not a rewind: no LearnerAction or decision disappears."""
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    session = driver.session()
+    actions_before = len(list(session.action_log.actions()))
+    assert session.world.has("decisions", "d-phish-report")
+
+    driver.act("mail.delete", "m-payroll-restructure")
+    driver.act("mail.restore", "m-payroll-restructure")
+
+    session = driver.session()
+    assert len(list(session.action_log.actions())) == actions_before + 2
+    assert session.world.has("decisions", "d-phish-report")
+
+
+def test_mail_restore_does_not_reopen_a_scoring_opportunity(driver):
+    """Reporting again after a restore is a fresh decision, not a duplicate."""
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    driver.act("mail.delete", "m-payroll-restructure")
+    driver.act("mail.restore", "m-payroll-restructure")
+    entry = message(driver.snapshot(), "m-payroll-restructure")
+    # Restore alone does not re-mark the message reported/unresolved.
+    assert entry["reported"] is True
+
+
+def test_mail_delete_permanently_is_idempotent(driver):
+    driver.act("mail.delete", "m-benefits")
+    driver.act("mail.delete_permanently", "m-benefits")
+    revision_before = driver.revision
+    driver.act("mail.delete_permanently", "m-benefits")
+    assert driver.revision == revision_before + 1
+
+
+def test_mail_delete_permanently_refuses_restore(driver):
+    driver.act("mail.delete", "m-benefits")
+    driver.act("mail.delete_permanently", "m-benefits")
+    with pytest.raises(UnknownTargetError):
+        driver.act("mail.restore", "m-benefits")
+
+
+def test_mail_delete_permanently_refuses_normal_mail_operations(driver):
+    driver.act("mail.delete", "m-benefits")
+    driver.act("mail.delete_permanently", "m-benefits")
+    for action_type in ("mail.open", "mail.report", "mail.reply",
+                        "mail.forward", "mail.delete"):
+        with pytest.raises(UnknownTargetError):
+            driver.act(action_type, "m-benefits")
+
+
+def test_mail_delete_permanently_keeps_history_for_scoring(driver):
+    """The flag hides the message from the projection, never from scoring."""
+    driver.deliver_until("m-payroll-restructure")
+    driver.act("mail.report", "m-payroll-restructure")
+    driver.act("mail.delete", "m-payroll-restructure")
+    driver.act("mail.delete_permanently", "m-payroll-restructure")
+    session = driver.session()
+    assert session.world.has("decisions", "d-phish-report")
+    state = session.world.get("mail", "m-payroll-restructure")
+    assert state["delivered"] is True
+    assert state["permanently_deleted"] is True
+
+
 def test_mail_reply_lands_in_sent_as_plain_text(driver):
     driver.deliver_until("m-headcount")
     result = driver.act("mail.reply", "m-headcount",
@@ -174,6 +320,103 @@ def test_mail_reply_refuses_text_beyond_the_bound(driver):
         driver.act("mail.reply", "m-headcount", {"text": "x" * 5000})
 
 
+# ---------------------------------------------------------------------------
+# Mail ordering -- newest delivery first, regardless of authored position
+# ---------------------------------------------------------------------------
+#
+# ``m-headcount`` has a far larger authored content-position ("order": 100 in
+# rewindsec.workstation.content.world) than ``m-payslip-aug`` ("order": 10).
+# If the projection still sorted by that authored field, delivering
+# m-payslip-aug *after* m-headcount would still show it below m-headcount --
+# exactly the bug reported (badge increments, new mail buried instead of
+# appearing on top). These tests force delivery in an order that is the
+# reverse of the authored positions and assert the projection reflects
+# delivery chronology, not authoring order.
+
+def test_mail_projection_orders_by_delivery_time_not_authored_position(driver):
+    driver.deliver_until("m-headcount")     # authored order 100
+    driver.advance(60000)
+    driver.deliver_until("m-payslip-aug")   # authored order 10, delivered later
+    snapshot = driver.snapshot()
+    ids = [m["id"] for m in snapshot["mail"]["messages"] if m["folder"] == "inbox"]
+    assert ids.index("m-payslip-aug") < ids.index("m-headcount"), (
+        "message delivered later must sort above one delivered earlier, "
+        "even though its authored content position is smaller")
+
+
+def test_mail_delivered_message_carries_a_monotonic_delivery_order(driver):
+    driver.deliver_until("m-headcount")
+    first = message(driver.snapshot(), "m-headcount")["order"]
+    driver.advance(1)
+    driver.deliver_until("m-payslip-aug")
+    second = message(driver.snapshot(), "m-payslip-aug")["order"]
+    assert second > first
+
+
+def test_mail_ordering_is_stable_across_repeated_snapshots(driver):
+    """The projection must be idempotent: calling it twice changes nothing."""
+    driver.deliver_until("m-headcount")
+    driver.advance(1000)
+    driver.deliver_until("m-payslip-aug")
+    first = [m["id"] for m in driver.snapshot()["mail"]["messages"]]
+    second = [m["id"] for m in driver.snapshot()["mail"]["messages"]]
+    assert first == second
+
+
+def test_mail_ordering_survives_resume(tmp_path):
+    """Delivery order must persist -- it cannot live only in JS state."""
+    from tests.workstation_helpers import build_service, sqlite_uri
+    db = sqlite_uri(tmp_path)
+    service, _ = build_service(db)
+    driver = Driver.start(service, focus="mixed", mode="simulation")
+    driver.deliver_until("m-headcount")
+    driver.advance(2000)
+    driver.deliver_until("m-payslip-aug")
+    before = [m["id"] for m in driver.snapshot()["mail"]["messages"]
+              if m["folder"] == "inbox"]
+
+    # A fresh service against the same database simulates a process restart.
+    service2, _ = build_service(db)
+    driver2 = Driver(service2, driver.session_id, driver.learner_ref)
+    after = [m["id"] for m in driver2.snapshot()["mail"]["messages"]
+             if m["folder"] == "inbox"]
+    assert before == after
+    assert after.index("m-payslip-aug") < after.index("m-headcount")
+
+
+def test_mail_reply_sent_item_sorts_by_send_time_not_a_fixed_offset(driver):
+    """Sent mail must interleave with Inbox by real chronology too."""
+    driver.deliver_until("m-headcount")
+    driver.act("mail.reply", "m-headcount", {"text": "Ack."})
+    driver.advance(5000)
+    driver.deliver_until("m-payslip-aug")
+    snapshot = driver.snapshot()
+    order_by_id = {m["id"]: m["order"] for m in snapshot["mail"]["messages"]}
+    sent = [m for m in snapshot["mail"]["messages"] if m["folder"] == "sent"][0]
+    # The reply was sent before m-payslip-aug arrived, so it must rank below
+    # (older than) that later inbox delivery under the unified order key.
+    assert order_by_id["m-payslip-aug"] > order_by_id[sent["id"]]
+
+
+def test_mail_delivery_ordering_does_not_perturb_rng_streams(driver):
+    """Ordering must be derived only from delivered_at_ms/delivery_seq --
+    never from an RNG stream that scoring/threat selection depends on."""
+    session = driver.session()
+    before = session.rng.capture_state() if hasattr(session, "rng") else None
+    driver.deliver_until("m-headcount")
+    driver.advance(1000)
+    driver.deliver_until("m-payslip-aug")
+    driver.snapshot()
+    driver.snapshot()
+    if before is not None:
+        after = session.rng.capture_state()
+        # Merely reading/re-sorting the projection must not draw from any
+        # named stream; forced delivery itself is documented (Driver.
+        # deliver_until) to draw nothing from threat/timing/consequence
+        # streams either.
+        assert after == before
+
+
 #: Downloading an attachment mints a file id derived from the message and the
 #: attachment index, so a test can name it without guessing.
 DOWNLOADED_RATE_CARD = "f-dl-m-rate-card-0"
@@ -187,9 +430,28 @@ def test_downloading_an_attachment_creates_a_real_file(driver):
     entry = file_row(result.snapshot, DOWNLOADED_RATE_CARD)
     assert entry is not None
     assert entry["location"] == "loc-downloads"
-    assert entry["state"] == "downloaded"
+    # "downloaded" is a legacy v2.0.1 value of ``state`` (a
+    # readability/security field: "normal", "unavailable", ...). A freshly
+    # downloaded file is "normal" and carries the unseen-download flag
+    # separately, in ``is_new`` -- see
+    # ``rewindsec.workstation.projection._files_view``.
+    assert entry["state"] == "normal"
+    assert entry["is_new"] is True
     # The macro flag is visible evidence a real mail client also shows.
     assert entry["macro"] is True
+
+
+def test_opening_a_downloaded_file_clears_the_new_badge(driver):
+    driver.deliver_until("m-rate-card")
+    driver.act("mail.download_attachment", "m-rate-card", {"index": 0})
+    assert file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)["is_new"] is True
+
+    driver.act("files.open", DOWNLOADED_RATE_CARD)
+    entry = file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)
+    assert entry["is_new"] is False
+    # Clearing the badge is not the same field as readability: "normal"
+    # stays "normal" for a file that opened cleanly.
+    assert entry["state"] == "normal"
 
 
 def test_downloading_the_same_attachment_twice_makes_one_file(driver):
@@ -237,6 +499,63 @@ def test_files_delete_removes_it_from_the_learner_view_but_keeps_the_record(driv
     assert file_row(driver.snapshot(), "f-scratch") is None
     # The world still holds it, flagged. Deletion is a fact, not an erasure.
     assert driver.session().world.get("files", "f-scratch")["deleted"] is True
+
+
+def _seed_file(driver, file_id, **fields):
+    """Write a file world-doc directly and persist it, the way a legacy
+    session's stored world would already have one on disk."""
+    session = driver.session()
+    expected = session.revision
+    base = {
+        "location": "loc-downloads", "name": "legacy.pdf", "display_name": None,
+        "kind": "document", "size": "1 KB", "modified": "Today 09:00",
+        "state": "normal", "note": "", "owner": None, "source": None,
+        "preview": [], "order": 0, "macro": False, "origin_mail": None,
+    }
+    base.update(fields)
+    session.mutate_world("files", file_id, base)
+    driver.service._save(session, expected)
+
+
+def test_selecting_a_file_does_not_clear_the_new_badge(driver):
+    driver.deliver_until("m-rate-card")
+    driver.act("mail.download_attachment", "m-rate-card", {"index": 0})
+    driver.act("files.inspect", DOWNLOADED_RATE_CARD)
+    assert file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)["is_new"] is True
+
+
+def test_a_legacy_downloaded_file_projects_as_new(driver):
+    """A v2.0.1 world-doc that only ever wrote state="downloaded"."""
+    _seed_file(driver, "f-legacy", state="downloaded")
+    entry = file_row(driver.snapshot(), "f-legacy")
+    assert entry["is_new"] is True
+
+
+def test_opening_a_legacy_downloaded_file_normalises_state_and_clears_new(driver):
+    _seed_file(driver, "f-legacy", state="downloaded")
+    driver.act("files.open", "f-legacy")
+    entry = file_row(driver.snapshot(), "f-legacy")
+    assert entry["is_new"] is False
+    assert entry["state"] == "normal"
+
+
+def test_opening_an_unavailable_file_leaves_the_new_badge_unchanged(driver):
+    _seed_file(driver, "f-unread", state="unavailable", note="Locked.",
+              is_new=True)
+    driver.act("files.open", "f-unread")
+    entry = file_row(driver.snapshot(), "f-unread")
+    assert entry["is_new"] is True
+
+
+def test_opening_a_hostile_macro_file_clears_new_and_still_starts_the_incident(driver):
+    driver.deliver_until("m-rate-card")
+    driver.act("mail.download_attachment", "m-rate-card", {"index": 0})
+    driver.act("files.open", DOWNLOADED_RATE_CARD)
+    entry = file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)
+    assert entry["is_new"] is False
+
+    snapshot = driver.advance(120000)
+    assert incident(snapshot, "inc-files") is not None
 
 
 def test_opening_a_downloaded_macro_workbook_starts_the_file_incident(driver):

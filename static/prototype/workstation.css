@@ -471,7 +471,13 @@
   animation: pw-window-min var(--p-med) var(--p-ease-exit) forwards;
   pointer-events: none;
 }
-.pw-window.is-maximized { inset: var(--s-4) !important; width: auto !important; height: auto !important; }
+/* A maximised window fills the work area edge-to-edge: no rounded frame,
+ * no drop shadow floating it off the desk, no border implying it could be
+ * dragged (it can't -- see the canDrag()/maximised guard in workstation.js). */
+.pw-window.is-maximized {
+  inset: var(--s-4) !important; width: auto !important; height: auto !important;
+  border-radius: 0; box-shadow: none; border-color: transparent;
+}
 .pw-window[hidden] { display: none !important; }
 
 .pw-winbar {

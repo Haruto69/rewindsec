@@ -109,10 +109,11 @@ def deliver_mail(session, mail_id, folder=None, cause_event_id=None):
         visibility=EventVisibility.LEARNER_VISIBLE,
         causes=(cause_event_id,) if cause_event_id else ())
 
+    delivery_seq = next_seq(session, "mail_delivery_seq")
     mutation = session.mutate_world(NS_MAIL, mail_id, dict(
         state, delivered=True, unread=True, read=False,
         folder=target_folder, received=clock.workday_label(session.now_ms),
-        delivered_at_ms=session.now_ms),
+        delivered_at_ms=session.now_ms, delivery_seq=delivery_seq),
         cause_event_id=event.event_id)
 
     _make_mail_facts_available(session, message)
@@ -152,12 +153,14 @@ def add_sent_mail(session, subject, to, body, cause_event_id=None):
     """
     seq = next_seq(session, "sent_seq")
     sent_id = "m-sent-%d" % seq
+    delivery_seq = next_seq(session, "mail_delivery_seq")
     session.mutate_world(NS_MAIL_SENT, sent_id, {
         "subject": subject,
         "to": to,
         "body": body,
         "received": clock.workday_label(session.now_ms),
-        "order": 900 + seq,
+        "sent_at_ms": session.now_ms,
+        "delivery_seq": delivery_seq,
     }, cause_event_id=cause_event_id)
     return sent_id
 
@@ -310,7 +313,8 @@ def add_downloaded_file(session, file_id, location_id, name, kind, size,
         "kind": kind,
         "size": size,
         "modified": clock.workday_label(session.now_ms),
-        "state": "downloaded",
+        "state": "normal",
+        "is_new": True,
         "note": "",
         "owner": None,
         "source": source,
