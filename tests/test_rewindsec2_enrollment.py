@@ -151,28 +151,17 @@ def test_a_bound_student_gets_no_second_code(tmp_path):
     assert excinfo.value.code == "already_enrolled"
 
 
-def test_an_anonymous_browser_can_enrol_and_keeps_its_earlier_history_where_it_is(
+def test_a_legacy_anonymous_identity_cannot_receive_new_session_ownership(
         tmp_path):
-    """An auto-provisioned record is released, not merged.
-
-    Ownership is established once and never moved -- so earlier anonymous
-    sessions stay attributed to the anonymous record rather than being
-    silently reattributed to a named person, which is a claim the system
-    cannot honestly make.
-    """
+    """Legacy rows remain for audit but are not valid production owners."""
     management, workstation, _sessions = build(sqlite_uri(tmp_path))
     anonymous = management.ensure_student_for_learner_ref(LEARNER)
     session_id = workstation.start_session(LEARNER, "mixed", "practice")
-    management.register_session(session_id, LEARNER)
-
-    roster = management.create_student("Aarti Rao")
-    bound, newly = management.claim_enrollment(
-        LEARNER, management.create_enrollment_code(roster.student_id).code)
-
-    assert newly is True and bound.student_id == roster.student_id
-    assert management.get_student(anonymous.student_id).learner_ref is None
-    assert management.get_session_ownership(session_id).student_id \
-        == anonymous.student_id
+    with pytest.raises(ManagementRefused) as excinfo:
+        management.register_session(session_id, LEARNER)
+    assert excinfo.value.code == "enrollment_required"
+    assert management.get_student(anonymous.student_id) == anonymous
+    assert management.get_session_ownership(session_id) is None
 
 
 def test_sessions_started_after_binding_resolve_to_the_roster_student(tmp_path):
@@ -201,7 +190,7 @@ def test_a_trainer_assignment_becomes_usable_by_the_bound_student(tmp_path):
     # Before enrolling, this browser is nobody the assignment reaches.
     with pytest.raises(ManagementRefused) as excinfo:
         management.start_attempt(LEARNER, assessment.assessment_id)
-    assert excinfo.value.code == "not_assigned"
+    assert excinfo.value.code == "enrollment_required"
 
     management.claim_enrollment(
         LEARNER, management.create_enrollment_code(roster.student_id).code)
@@ -358,7 +347,7 @@ def test_a_second_browser_cannot_replay_the_code_over_http(
     refused = _post(other_client, "/prototype/api/session/assessment/start",
                     {"assessment_id": assessment["id"]})
     assert refused.status_code == 409
-    assert refused.get_json()["error"]["code"] == "not_assigned"
+    assert refused.get_json()["error"]["code"] == "enrollment_required"
 
 
 def test_the_learner_reference_is_never_rendered_on_the_trainer_roster(

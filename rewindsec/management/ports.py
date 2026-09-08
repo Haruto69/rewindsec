@@ -241,6 +241,25 @@ class ManagementRepository(ABC):
         """
 
     @abstractmethod
+    def revoke_open_enrollment_codes(self, student_id):
+        """Revoke every still-unused enrolment code for one student.
+
+        Returns the number of rows changed. Claimed codes are historical
+        audit records and must not be rewritten.
+        """
+
+    @abstractmethod
+    def reset_student_enrollment(self, student_id, expected_learner_ref,
+                                 expected_ownership_count,
+                                 expected_attempt_count):
+        """Atomically revoke open codes and unbind an unchanged student.
+
+        Returns the updated Student, or ``None`` if its binding changed or a
+        session ownership/Attempt was added after the service checked active
+        work. A failed condition must roll back code revocation as well.
+        """
+
+    @abstractmethod
     def bind_student_learner_ref(self, student_id, learner_ref,
                                  expected_learner_ref=None):
         """Atomically point one student at one server-minted learner reference.

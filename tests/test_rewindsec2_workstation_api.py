@@ -20,6 +20,8 @@ import re
 
 import pytest
 
+from tests.management_helpers import enroll_http_client
+
 CSRF_META = re.compile(rb'name="csrf-token" content="([^"]+)"')
 
 WORKSTATION = "/prototype/workstation"
@@ -46,6 +48,7 @@ def headers(client):
 
 
 def start(client, focus="phishing", mode="simulation"):
+    enroll_http_client(client)
     response = client.post(START, data=json.dumps({"focus": focus, "mode": mode}),
                            headers=headers(client))
     assert response.status_code == 201, response.data
@@ -510,6 +513,7 @@ def test_the_client_cannot_choose_how_far_time_moves(client):
 
 def test_the_generic_start_route_creates_a_self_directed_attempt(client,
                                                                   flask_app):
+    enroll_http_client(client)
     response = client.post(START, headers=headers(client),
                            data=json.dumps({"focus": "bec",
                                             "mode": "assessment"}))
@@ -534,6 +538,7 @@ def test_the_generic_start_route_creates_a_self_directed_attempt(client,
 
 
 def test_self_directed_assessment_resume_reuses_attempt(client, flask_app):
+    enroll_http_client(client)
     first = client.post(START, headers=headers(client),
                         data=json.dumps({"focus": "mfa",
                                          "mode": "assessment"}))

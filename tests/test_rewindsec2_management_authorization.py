@@ -64,6 +64,18 @@ def json_post(client, path, payload, token=None):
 
 
 def start_learner_session(client, focus="phishing", mode="practice"):
+    # Authorization tests need an ordinary learner session, which production
+    # now obtains only after enrollment. Establish a real roster binding; the
+    # boundary under test here remains learner-vs-trainer authorization.
+    client.get("/prototype/api/me")
+    with client.session_transaction() as sess:
+        learner_ref = sess["rewindsec2_learner"]
+    import app as app_module
+    with client.application.app_context():
+        manager = app_module.management_service()
+        student = manager.create_student("Authorization Learner")
+        code = manager.create_enrollment_code(student.student_id)
+        manager.claim_enrollment(learner_ref, code.code)
     response = json_post(client, "/prototype/api/session/start",
                          {"focus": focus, "mode": mode})
     assert response.status_code == 201, response.data
@@ -249,7 +261,7 @@ def test_a_learner_cannot_claim_another_learners_attempt(flask_app, client,
                         {"assessment_id": assessment["id"]})
     assert refused.status_code == 409
     error = refused.get_json()["error"]
-    assert error["code"] == "not_assigned"
+    assert error["code"] == "enrollment_required"
     # And the refusal says nothing about the attempt it declined to hand over.
     assert error.get("detail", {}) == {}
     assert session_id not in json.dumps(refused.get_json())

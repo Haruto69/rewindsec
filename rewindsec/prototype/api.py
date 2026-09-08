@@ -209,16 +209,23 @@ def register_workstation_api(bp, service_factory, updates,
         """The management service, or ``None`` when this app has none."""
         return None if management_factory is None else management_factory()
 
+    def require_enrollment():
+        """Refuse product starts unless this browser is on the active roster."""
+        manager = management()
+        if manager is None:
+            return None
+        try:
+            return manager.require_enrolled_student(learner_ref())
+        except ManagementRefused as exc:
+            raise AssessmentRefusedError(
+                exc.message, detail=exc.detail, code=exc.code)
+
     def register_ownership(session_id, attempt_id=None):
         """Bind a freshly created session to its persistent Student.
 
-        Best-effort by design: a failure to record the administrative
-        ownership row must never destroy a session the learner is already in.
-        The session's own ``learner_ref`` remains the authoritative owner
-        either way -- every access check in
-        :mod:`rewindsec.workstation.service` compares that and nothing else --
-        so an unregistered session is *unowned in the console*, never
-        misattributed.
+        Enrollment failures are authoritative: ``register_session`` abandons
+        a raced start before returning them. Other persistence failures remain
+        internal errors rather than producing valid but unowned learner work.
         """
         manager = management()
         if manager is None:
@@ -226,8 +233,11 @@ def register_workstation_api(bp, service_factory, updates,
         try:
             return manager.register_session(session_id, learner_ref(),
                                             attempt_id=attempt_id)
-        except (ManagementError, ManagementRefused):
-            return None
+        except ManagementRefused as exc:
+            raise AssessmentRefusedError(
+                exc.message, detail=exc.detail, code=exc.code)
+        except ManagementError:
+            raise InternalWorkstationError()
 
     def sync_attempt_for(session_id):
         """Reconcile the attempt bound to this session, if there is one."""
@@ -241,8 +251,9 @@ def register_workstation_api(bp, service_factory, updates,
             return None
 
     def create(service, focus, mode):
+        manager = management()
+        require_enrollment()
         if mode == "assessment":
-            manager = management()
             if manager is None:
                 raise InvalidRequestError(
                     "Self-directed Assessment is not available here.")
@@ -263,9 +274,9 @@ def register_workstation_api(bp, service_factory, updates,
                                              learner_ref()),
             }, 201 if created else 200)
         session_id = service.start_session(learner_ref(), focus, mode)
+        register_ownership(session_id)
         session[SESSION_KEY] = session_id
         session.modified = True
-        register_ownership(session_id)
         return ok({"snapshot": service.snapshot(session_id, learner_ref())}, 201)
 
     @bp.route("/api/session/start", methods=["POST"])
@@ -301,6 +312,10 @@ def register_workstation_api(bp, service_factory, updates,
         """
         focus, mode = read_focus_and_mode()
         service = service_factory()
+        # Check before touching an existing session: an enrollment reset must
+        # not let a stale browser complete history while a replacement start
+        # is being refused.
+        require_enrollment()
         current = live_session(service)
         if current is not None:
             service.end_session(current.session_id, learner_ref())
@@ -437,13 +452,14 @@ def register_workstation_api(bp, service_factory, updates,
         """
         manager = require_management()
         student = manager.student_for_learner_ref(learner_ref())
-        if student is None:
-            return ok({"student": None})
-        return ok({"student": {"id": student.student_id,
+        if student is None or student.origin != "trainer" \
+                or student.status != "active":
+            return ok({"enrolled": False, "student": None})
+        return ok({"enrolled": True,
+                   "student": {"id": student.student_id,
                                "name": student.display_name,
                                "reference": student.reference,
-                               "cohort": student.cohort,
-                               "origin": student.origin}})
+                               "cohort": student.cohort}})
 
     @bp.route("/api/assessments", methods=["GET"])
     def api_assessments():
@@ -455,7 +471,12 @@ def register_workstation_api(bp, service_factory, updates,
         assessment has been handled, never how well.
         """
         manager = require_management()
-        student = manager.ensure_student_for_learner_ref(learner_ref())
+        try:
+            student = manager.require_enrolled_student(learner_ref())
+        except ManagementRefused as exc:
+            if exc.code == "enrollment_required":
+                return ok({"assessments": []})
+            raise
         routes = manager.effective_assignments(student.student_id)
 
         seen, out = set(), []

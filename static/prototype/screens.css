@@ -272,6 +272,12 @@
   font-size: var(--t-2xs); letter-spacing: .12em; text-transform: uppercase;
   color: var(--p-accent-lift); margin-top: var(--s-5); font-weight: 700;
 }
+#pw-res-scoring-note {
+  margin: var(--s-4) 0 0 auto;
+  max-width: 34rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
 
 /* Dimension cards. The gauge sits at the foot of the card rather than under
  * the title, so the card reads as a paragraph with a measurement beneath it
@@ -429,6 +435,7 @@
     padding: var(--s-8) var(--s-7);
   }
   .pw-overall { text-align: left; }
+  #pw-res-scoring-note { margin-left: 0; }
   .pw-overall-num { font-size: 3.25rem; }
   .pw-tl { grid-template-columns: minmax(0, 1fr); gap: var(--s-1); }
   .pw-entry, .pw-results { padding-left: var(--s-6); padding-right: var(--s-6); }

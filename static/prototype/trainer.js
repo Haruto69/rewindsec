@@ -129,6 +129,33 @@
     });
   }
 
+  var resetEnrollmentButton = qs('#pw-reset-enrollment');
+  if (resetEnrollmentButton) {
+    resetEnrollmentButton.addEventListener('click', function () {
+      var status = qs('#pw-reset-enrollment-status');
+      if (!window.confirm('Reset enrollment for this student? Their historical sessions and results will remain attached to this record.')) {
+        say(status, 'Enrollment reset cancelled.');
+        return;
+      }
+      resetEnrollmentButton.disabled = true;
+      say(status, 'Resetting…');
+      post('/api/trainer/students/'
+           + encodeURIComponent(resetEnrollmentButton.getAttribute('data-student-id'))
+           + '/enrollment/reset', {confirm: true})
+        .then(function (result) {
+          resetEnrollmentButton.disabled = false;
+          if (!result.ok) {
+            say(status, errorText(result, 'Enrollment could not be reset.'));
+            return;
+          }
+          window.location.reload();
+        }).catch(function () {
+          resetEnrollmentButton.disabled = false;
+          say(status, 'Could not reach the server.');
+        });
+    });
+  }
+
   // =======================================================================
   // Groups and membership
   // =======================================================================

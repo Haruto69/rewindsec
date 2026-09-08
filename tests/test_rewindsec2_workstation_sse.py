@@ -28,6 +28,7 @@ import time
 import pytest
 
 from rewindsec.workstation.updates import UpdateBroker
+from tests.management_helpers import enroll_http_client
 
 CSRF_META = re.compile(rb'name="csrf-token" content="([^"]+)"')
 WORKSTATION = "/prototype/workstation"
@@ -42,6 +43,7 @@ def headers(client):
 
 
 def start(client, focus="phishing", mode="simulation"):
+    enroll_http_client(client)
     response = client.post("/prototype/api/session/start",
                            data=json.dumps({"focus": focus, "mode": mode}),
                            headers=headers(client))

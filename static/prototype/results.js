@@ -521,17 +521,11 @@
   }
 
   function renderScoringNote(real) {
-    var existing = qs('#pw-res-scoring-note');
-    if (existing) { existing.parentNode.removeChild(existing); }
-    var note = document.createElement('p');
-    note.id = 'pw-res-scoring-note';
-    note.className = 'pw-xsmall pw-muted';
-    note.style.marginTop = '.5rem';
+    var note = qs('#pw-res-scoring-note');
+    if (!note) { return; }
     note.textContent = real
       ? real.note
       : 'A finalized score is unavailable for this earlier session.';
-    var overall = qs('#pw-res-overall');
-    if (overall && overall.parentNode) { overall.parentNode.appendChild(note); }
   }
 
   var completedRun = loadRun();

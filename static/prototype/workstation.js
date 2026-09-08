@@ -462,6 +462,29 @@
     }
   }
 
+  var scrollPositions = {};
+
+  function captureScroll() {
+    qsa('[data-scroll-key]').forEach(function (node) {
+      // Responsive master/detail panes remain in the DOM while hidden. Some
+      // browsers report their scrollTop as zero in that state; recording it
+      // would erase the real list position just before the learner returns.
+      if (!node.getClientRects().length) { return; }
+      scrollPositions[node.getAttribute('data-scroll-key')] = {
+        top: node.scrollTop, left: node.scrollLeft
+      };
+    });
+  }
+
+  function restoreScroll() {
+    qsa('[data-scroll-key]').forEach(function (node) {
+      var position = scrollPositions[node.getAttribute('data-scroll-key')];
+      if (!position) { return; }
+      node.scrollTop = position.top;
+      node.scrollLeft = position.left;
+    });
+  }
+
   // =========================================================================
   // Rendering
   // =========================================================================
@@ -469,12 +492,14 @@
   function render() {
     if (!SNAP) { return; }
     var saved = captureFocus();
+    captureScroll();
     renderTopBar();
     renderRail();
     renderDesk();
     renderWindows();
     renderNotifications();
     renderComparison();
+    restoreScroll();
     restoreFocus(saved);
   }
 
@@ -685,7 +710,7 @@
     return ''
       + '<div class="pw-app' + (state.mobileDetail ? ' is-split-mobile' : '') + '">'
       + '  <div class="pw-pane pw-sidepane">'
-      + '    <div class="pw-pane-scroll"><div class="pw-nav">' + folders + '</div></div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="mail-folders"><div class="pw-nav">' + folders + '</div></div>'
       + '  </div>'
       + '  <div class="pw-pane pw-listpane">'
       + '    <div class="pw-pane-head">'
@@ -698,7 +723,8 @@
           ? '<div class="pw-mailbanner">' + icon('info')
             + '<span>' + esc(SNAP.mail.rule) + '</span></div>'
           : '')
-      + '    <div class="pw-pane-scroll">' + rows + '</div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="mail-list:'
+      + esc(state.folder) + ':' + esc(state.search) + '">' + rows + '</div>'
       + '  </div>'
       + '  <div class="pw-pane pw-mainpane">'
       + (selected ? renderReader(selected)
@@ -800,7 +826,7 @@
         + '<button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-mail-back="1">'
         + icon('back') + ' Inbox</button>'
         + '<h3>' + esc(message.subject) + '</h3></div>'
-        + '<div class="pw-pane-scroll"><div class="pw-reader">'
+        + '<div class="pw-pane-scroll" data-scroll-key="mail-reader:' + esc(message.id) + '"><div class="pw-reader">'
         + '<h2 class="pw-reader-subject">' + esc(message.subject) + '</h2>'
         + '<div class="pw-reader-from"><span class="pw-avatar is-neutral" aria-hidden="true">'
         + esc(initialsOf(message.from_name)) + '</span>'
@@ -830,7 +856,7 @@
       + (state.headers ? 'Hide header' : 'Show header') + '</button>'
       + '</div>'
       + confirmation
-      + '<div class="pw-pane-scroll"><div class="pw-reader">'
+      + '<div class="pw-pane-scroll" data-scroll-key="mail-reader:' + esc(message.id) + '"><div class="pw-reader">'
       + '  <h2 class="pw-reader-subject">' + esc(message.subject) + '</h2>'
       + '  <div class="pw-reader-from">'
       + '    <span class="pw-avatar is-neutral" aria-hidden="true">'
@@ -1257,7 +1283,7 @@
     return ''
       + '<div class="pw-app">'
       + '  <div class="pw-pane pw-sidepane">'
-      + '    <div class="pw-pane-scroll"><div class="pw-nav">' + nav + '</div></div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="files-folders"><div class="pw-nav">' + nav + '</div></div>'
       + '  </div>'
       + '  <div class="pw-pane pw-mainpane">'
       + '    <div class="pw-pane-head"><h3>' + esc(current.name) + '</h3>'
@@ -1269,7 +1295,7 @@
             + ' The Service Desk page in the Browser has the actions.</span></div>'
           : '')
       + header
-      + '    <div class="pw-pane-scroll">' + rows + '</div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="files-list:' + esc(current.id) + '">' + rows + '</div>'
       + (selected ? renderFileInfo(selected) : '')
       + '  </div>'
       + '</div>';
@@ -1412,7 +1438,7 @@
       + '<div class="pw-app' + (state.mobileDetail ? ' is-split-mobile' : '') + '">'
       + '  <div class="pw-pane pw-listpane" style="width:250px">'
       + '    <div class="pw-pane-head"><h3>Conversations</h3></div>'
-      + '    <div class="pw-pane-scroll">' + list + '</div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="messages-list">' + list + '</div>'
       + '  </div>'
       + '  <div class="pw-pane pw-mainpane">'
       + '    <div class="pw-pane-head">'
@@ -1422,7 +1448,7 @@
       + '      <span class="pw-chip is-plain">' + esc(current.presence) + '</span>'
       + '      <span class="pw-spacer"></span>' + verify
       + '    </div>'
-      + '    <div class="pw-pane-scroll"><div class="pw-thread">' + bubbles + '</div></div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="messages-thread:' + esc(current.id) + '"><div class="pw-thread">' + bubbles + '</div></div>'
       + '    <div class="pw-pane-foot">'
       + '      <input class="pw-input" id="pw-msg-input" placeholder="Write a message"'
       + '        aria-label="Message" value="' + esc(state.draft) + '" style="flex:1">'
@@ -1495,7 +1521,7 @@
       + '    <div class="pw-pane-head"><h3>Waiting for you</h3>'
       + '<span class="pw-spacer"></span>'
       + '<span class="pw-chip is-plain">' + esc(SNAP.learner.email) + '</span></div>'
-      + '    <div class="pw-pane-scroll">' + prompts
+      + '    <div class="pw-pane-scroll" data-scroll-key="authenticator-main">' + prompts
       + '      <div class="pw-pane-head" style="border-top:1px solid var(--p-line)">'
       + '        <h3>Recent activity</h3><span class="pw-spacer"></span>'
       + '        <button type="button" class="pw-btn is-sm is-quiet" data-auth-history="1"'
@@ -1544,7 +1570,7 @@
       + '          aria-label="Search the directory" value="' + esc(state.search) + '">'
       + '      </label>'
       + '    </div>'
-      + '    <div class="pw-pane-scroll">' + rows + '</div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="directory-list:' + esc(state.search) + '">' + rows + '</div>'
       + '  </div>'
       + '  <div class="pw-pane pw-mainpane">'
       + (selected ? renderContact(selected)
@@ -1560,7 +1586,7 @@
       + '<button type="button" class="pw-btn is-sm is-quiet pw-mobile-back" data-dir-back="1">'
       + icon('back') + '</button>'
       + '<h3>' + esc(contact.name) + '</h3></div>'
-      + '<div class="pw-pane-scroll"><div class="pw-contact">'
+      + '<div class="pw-pane-scroll" data-scroll-key="directory-contact:' + esc(contact.id) + '"><div class="pw-contact">'
       + '<div class="pw-contact-head">'
       + '<span class="pw-avatar is-lg" aria-hidden="true">' + esc(contact.initials) + '</span>'
       + '<div><h3>' + esc(contact.name) + '</h3>'
@@ -1617,7 +1643,7 @@
       + '  <div class="pw-pane pw-listpane" style="width:220px">'
       + '    <div class="pw-pane-head"><h3>Notes</h3><span class="pw-spacer"></span>'
       + '      <button type="button" class="pw-btn is-sm" data-note-new="1">New</button></div>'
-      + '    <div class="pw-pane-scroll">' + rows + '</div>'
+      + '    <div class="pw-pane-scroll" data-scroll-key="notes-list">' + rows + '</div>'
       + '  </div>'
       + '  <div class="pw-pane pw-mainpane">'
       + (current

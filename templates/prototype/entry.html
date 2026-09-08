@@ -16,9 +16,6 @@
         <span>{{ org.name }}</span>
       </span>
     </span>
-    <nav class="pw-frame-nav" aria-label="RewindSec navigation">
-      <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.trainer_dashboard') }}">Trainer</a>
-    </nav>
   </div>
 </header>
 
@@ -31,15 +28,14 @@
     which is which.</p>
   </div>
 
-  <div class="pw-entry-who">
-    <span class="pw-avatar is-lg" aria-hidden="true">{{ learner.initials }}</span>
+  <div class="pw-entry-who" id="pw-entry-identity">
+    <span class="pw-avatar is-lg" id="pw-entry-avatar" aria-hidden="true">?</span>
     <span class="pw-entry-who-main">
-      <b>{{ learner.name }}</b>
-      <span>{{ learner.role }} · {{ learner.department }}</span>
+      <b id="pw-entry-name">Unenrolled device</b>
+      <span id="pw-entry-detail">Enter the enrollment code supplied by your trainer to continue.</span>
     </span>
-    <span class="pw-entry-who-meta">
-      Employee {{ learner.employee_ref }}<br>
-      Manager · {{ learner.manager }}
+    <span class="pw-entry-who-meta" id="pw-entry-meta">
+      Enrollment required
     </span>
   </div>
 
@@ -136,7 +132,8 @@
       <p class="pw-entry-summary" id="pw-entry-summary" role="status">
         Mixed focus, Simulation mode.
       </p>
-      <button type="submit" class="pw-btn is-primary is-lg">Enter the workstation</button>
+      <button type="submit" class="pw-btn is-primary is-lg"
+              {% if assessments_available %}disabled{% endif %}>Enter the workstation</button>
     </div>
   </form>
 </main>
@@ -188,6 +185,11 @@
   var form = document.getElementById('pw-enrol-form');
   var field = document.getElementById('pw-enrol-code');
   var status = document.getElementById('pw-enrol-status');
+  var identityAvatar = document.getElementById('pw-entry-avatar');
+  var identityName = document.getElementById('pw-entry-name');
+  var identityDetail = document.getElementById('pw-entry-detail');
+  var identityMeta = document.getElementById('pw-entry-meta');
+  var entryForm = document.getElementById('pw-entry-form');
 
   function token() {
     var meta = document.querySelector('meta[name="csrf-token"]');
@@ -217,15 +219,27 @@
   function renderWho(student) {
     if (!student) {
       text(who, 'This device is not enrolled yet.');
+      text(identityAvatar, '?');
+      text(identityName, 'Unenrolled device');
+      text(identityDetail, 'Enter the enrollment code supplied by your trainer to continue.');
+      text(identityMeta, 'Enrollment required');
+      entryForm.querySelector('button[type="submit"]').disabled = true;
       return;
     }
-    if (student.origin === 'trainer') {
-      text(who, 'Enrolled as ' + student.name
-        + (student.cohort ? ' · ' + student.cohort : '') + '.');
-      form.hidden = true;
-    } else {
-      text(who, 'Training on this device is currently anonymous.');
-    }
+    var parts = student.name.split(/\s+/).filter(Boolean);
+    var initials = parts.length > 1
+      ? parts[0].charAt(0) + parts[parts.length - 1].charAt(0)
+      : student.name.slice(0, 2);
+    text(identityAvatar, initials.toUpperCase());
+    text(identityName, student.name);
+    text(identityDetail, [student.reference ? 'Reference: ' + student.reference : '',
+                          student.cohort ? 'Cohort: ' + student.cohort : '']
+                         .filter(Boolean).join(' · ') || 'Roster student');
+    text(identityMeta, 'Enrolled');
+    text(who, 'Enrolled as ' + student.name
+      + (student.cohort ? ' · ' + student.cohort : '') + '.');
+    form.hidden = true;
+    entryForm.querySelector('button[type="submit"]').disabled = false;
   }
 
   function renderAssessments(rows) {

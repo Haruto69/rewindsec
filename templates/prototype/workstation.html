@@ -104,10 +104,10 @@
 
       <div class="pw-rail-foot">
         <span class="pw-rail-user">
-          <span class="pw-avatar" aria-hidden="true">{{ learner.initials }}</span>
+          <span class="pw-avatar" aria-hidden="true">{{ learner_identity.initials if learner_identity else '?' }}</span>
           <span>
-            <b>{{ learner.name }}</b>
-            <span>{{ learner.role }}</span>
+            <b>{{ learner_identity.display_name if learner_identity else 'Unenrolled device' }}</b>
+            <span>Enrolled learner</span>
           </span>
         </span>
       </div>
@@ -116,7 +116,7 @@
     <main class="pw-workarea" id="pw-workarea" tabindex="-1">
       <div class="pw-desk" id="pw-desk">
         <div class="pw-desk-inner">
-          <h2>Good morning, {{ learner.given_name }}</h2>
+          <h2>Good morning, {{ learner_identity.display_name.split()[0] if learner_identity else 'learner' }}</h2>
           <p>Your applications are on the left. Work through the day as you
           normally would.</p>
           <div class="pw-desk-tasks" id="pw-desk-tasks" hidden>
@@ -136,7 +136,7 @@
             <svg aria-hidden="true"><use href="#i-close"></use></svg>
           </button>
         </div>
-        <div class="pw-pane-scroll" id="pw-notiflist"></div>
+        <div class="pw-pane-scroll" id="pw-notiflist" data-scroll-key="notifications"></div>
       </aside>
 
       <div class="pw-toasts" id="pw-toasts" aria-live="polite" aria-atomic="false"></div>

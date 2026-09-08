@@ -20,7 +20,7 @@ from rewindsec.management import analytics
 from rewindsec.management import projection as trainer_view
 from rewindsec.management.records import ASSESSMENT_STATUSES
 
-from tests.management_helpers import LEARNER, build, sqlite_uri
+from tests.management_helpers import LEARNER, build, enrolled_student, sqlite_uri
 from tests.workstation_helpers import Driver
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -31,7 +31,7 @@ SCORED_MAILS = ("m-payroll-restructure", "m-rate-card", "m-invoice-amend")
 def populated(tmp_path, run_a_session=True):
     """A roster, a group, an assessment, and optionally one played attempt."""
     management, workstation, sessions = build(sqlite_uri(tmp_path))
-    student = management.ensure_student_for_learner_ref(LEARNER)
+    student = enrolled_student(management)
     group = management.create_group("Operations A")
     management.add_member(group.group_id, student.student_id)
     assessment = management.create_assessment("Q3 judgement", "mixed", 2,
@@ -332,7 +332,7 @@ def test_the_trainer_routes_render_from_the_management_projection():
                          if isinstance(node, ast.FunctionDef)
                          and node.name.startswith("trainer_")
                          and node.name != "trainer_page"]
-    assert len(trainer_functions) == 6, [f.name for f in trainer_functions]
+    assert len(trainer_functions) == 7, [f.name for f in trainer_functions]
     for function in trainer_functions:
         body = ast.dump(function)
         assert "trainer_view" in body, function.name

@@ -366,9 +366,7 @@ def register_trainer_api(bp, service_factory, require_trainer):
         assessment = service.get_assessment(assessment_id)
         if assessment is None:
             return _error("not_found", "No such assessment.", 404)
-        student = service.get_student(student_id)
-        if student is None:
-            return _error("not_found", "No such student.", 404)
+        student = service.require_roster_student(student_id)
         sources = service.assignment_sources(assessment_id, student_id)
         return jsonify({
             "ok": True,
@@ -480,7 +478,7 @@ def register_trainer_api(bp, service_factory, require_trainer):
            "api_trainer_enrollment_status")
     def api_enrollment_status(student_id):
         service = service_factory()
-        student = service.require_student(student_id)
+        student = service.require_roster_student(student_id)
         codes = service.enrollment_codes_for_student(student_id)
         return jsonify({
             "student_id": student.student_id,
@@ -493,6 +491,20 @@ def register_trainer_api(bp, service_factory, require_trainer):
                       for row in codes],
         })
 
+    @route("/api/trainer/students/<student_id>/enrollment/reset",
+           "api_trainer_reset_enrollment", methods=("POST",))
+    def api_reset_enrollment(student_id):
+        payload = body()
+        confirm = field(payload, "confirm", ("confirm",))
+        if confirm is not True:
+            raise ManagementRefused(
+                "Confirm the enrollment reset before continuing.",
+                code="confirmation_required")
+        student, changed = service_factory().reset_enrollment(student_id)
+        return jsonify({"ok": True, "reset": bool(changed),
+                        "student_id": student.student_id,
+                        "enrolled": False})
+
     # -- attempts and results ----------------------------------------------
 
     @route("/api/trainer/attempts", "api_trainer_attempts")
@@ -500,6 +512,8 @@ def register_trainer_api(bp, service_factory, require_trainer):
         service = service_factory()
         student_id = request.args.get("student_id") or None
         assessment_id = request.args.get("assessment_id") or None
+        if student_id is not None:
+            service.require_roster_student(student_id)
         attempts = [service.sync_attempt(a) for a in
                     service.list_attempts(student_id=student_id,
                                           assessment_id=assessment_id)]

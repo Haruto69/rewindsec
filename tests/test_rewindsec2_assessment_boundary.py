@@ -38,7 +38,7 @@ from rewindsec.management.service import ManagementRefused
 from rewindsec.scoring import state as scoring_state
 from rewindsec.workstation.errors import ForbiddenActionError
 
-from tests.management_helpers import LEARNER, build, sqlite_uri
+from tests.management_helpers import LEARNER, build, enrolled_student, sqlite_uri
 from tests.workstation_helpers import Driver
 
 #: Authored mails that each present exactly one scoring opportunity and that
@@ -50,7 +50,7 @@ def assigned(tmp_path, required=3, max_attempts=3, status="open", uri=None,
              ids=None):
     management, workstation, sessions = build(uri or sqlite_uri(tmp_path),
                                               ids=ids)
-    student = management.ensure_student_for_learner_ref(LEARNER)
+    student = enrolled_student(management)
     group = management.create_group("Operations A")
     management.add_member(group.group_id, student.student_id)
     assessment = management.create_assessment(

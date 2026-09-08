@@ -26,6 +26,8 @@ import re
 
 import pytest
 
+from tests.management_helpers import enroll_http_client
+
 CSRF_META = re.compile(rb'name="csrf-token" content="([^"]+)"')
 
 WORKSTATION = "/prototype/workstation"
@@ -43,6 +45,7 @@ def headers(client):
 
 
 def start(client, focus="phishing", mode="simulation"):
+    enroll_http_client(client)
     response = client.post(START, data=json.dumps({"focus": focus, "mode": mode}),
                            headers=headers(client))
     assert response.status_code == 201, response.data[:400]

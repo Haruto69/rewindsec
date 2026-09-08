@@ -75,3 +75,29 @@ def build(uri, seed=4242, ids=None, clock=None):
 def roster(management, students=("Alice Doe", "Bob Roe")):
     """A small roster: the named students, all active."""
     return [management.create_student(name) for name in students]
+
+
+def enrolled_student(management, learner_ref=LEARNER, name="Enrolled Learner",
+                     **fields):
+    """Create a real roster student and bind the supplied browser identity."""
+    student = management.create_student(name, **fields)
+    code = management.create_enrollment_code(student.student_id)
+    bound, _newly = management.claim_enrollment(learner_ref, code.code)
+    return bound
+
+
+def enroll_http_client(client, name="HTTP Learner"):
+    """Bind a Flask test client to a real roster student, idempotently."""
+    current = client.get("/prototype/api/me").get_json()
+    if current.get("enrolled"):
+        return current["student"]
+    with client.session_transaction() as flask_session:
+        learner_ref = flask_session["rewindsec2_learner"]
+    import app as app_module
+    with client.application.app_context():
+        manager = app_module.management_service()
+        student = manager.create_student(name)
+        code = manager.create_enrollment_code(student.student_id)
+        bound, _newly = manager.claim_enrollment(learner_ref, code.code)
+        return {"id": bound.student_id, "name": bound.display_name,
+                "reference": bound.reference, "cohort": bound.cohort}

@@ -30,6 +30,7 @@ import pytest
 from tests.workstation_helpers import (Driver, build_service, contact,
                                        file_row, incident, message,
                                        sqlite_uri)
+from tests.management_helpers import enroll_http_client
 
 CSRF_META = __import__("re").compile(rb'name="csrf-token" content="([^"]+)"')
 
@@ -112,6 +113,7 @@ def worked_session(client):
     (inspect), Notes (write), Directory (call). Enough that "the same factual
     world" is a claim with content.
     """
+    enroll_http_client(client)
     post(client, "/prototype/api/session/start",
          {"focus": "phishing", "mode": "simulation"})
 

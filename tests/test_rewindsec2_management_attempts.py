@@ -26,7 +26,8 @@ from rewindsec.scoring import state as scoring_state
 from rewindsec.workstation.seeds import FixedSeedSource
 from rewindsec.workstation.service import WorkstationService
 
-from tests.management_helpers import LEARNER, OTHER_LEARNER, build, sqlite_uri
+from tests.management_helpers import (LEARNER, OTHER_LEARNER, build,
+                                      enrolled_student, sqlite_uri)
 from tests.workstation_helpers import Driver
 
 #: Three authored mails that each present exactly one scoring opportunity and
@@ -39,7 +40,7 @@ def assigned(tmp_path, required=3, max_attempts=1, focus="mixed",
     """One student, in one group, holding one assessment through that group."""
     management, workstation, sessions = build(uri or sqlite_uri(tmp_path),
                                               ids=ids)
-    student = management.ensure_student_for_learner_ref(LEARNER)
+    student = enrolled_student(management)
     group = management.create_group("Operations A")
     management.add_member(group.group_id, student.student_id)
     assessment = management.create_assessment(
@@ -69,6 +70,7 @@ def test_an_attempt_starts_in_assessment_mode_with_the_assessment_focus(tmp_path
 def test_self_directed_attempt_has_system_policy_not_assignment_provenance(
         tmp_path):
     management, _workstation, sessions = build(sqlite_uri(tmp_path))
+    enrolled_student(management)
     attempt, created = management.start_self_directed_attempt(LEARNER, "bec")
 
     assert created is True
@@ -124,6 +126,8 @@ def test_attempt_and_session_ownership_cannot_diverge(tmp_path):
 
 def test_an_unassigned_learner_cannot_start_an_attempt(tmp_path):
     management, _ws, _sessions, _student, _group, assessment = assigned(tmp_path)
+    enrolled_student(management, learner_ref=OTHER_LEARNER,
+                     name="Unassigned Learner")
     with pytest.raises(ManagementRefused) as excinfo:
         management.start_attempt(OTHER_LEARNER, assessment.assessment_id)
     assert excinfo.value.code == "not_assigned"

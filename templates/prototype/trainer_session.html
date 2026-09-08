@@ -1,0 +1,67 @@
+{% extends "prototype/trainer_base.html" %}
+{% block tr_title %}Session activity{% endblock %}
+
+{% block tr_content %}
+<nav class="pw-crumbs" aria-label="Breadcrumb">
+  <a href="{{ url_for('prototype.trainer_students') }}">Students</a>
+  <span aria-hidden="true">/</span>
+  <a href="{{ url_for('prototype.trainer_student', student_id=view.student.id) }}">{{ view.student.name }}</a>
+  <span aria-hidden="true">/</span>
+  <span>Session activity</span>
+</nav>
+
+<div class="pw-tr-head">
+  <div class="pw-tr-head-main">
+    <h1>Session activity</h1>
+    <p>{{ view.student.name }} · {{ view.session.focus|capitalize }} ·
+       {{ view.session.mode|capitalize }} · {{ view.session.status_label }}</p>
+  </div>
+</div>
+
+<div class="pw-card" style="margin-bottom:1.25rem">
+  <dl class="pw-tr-detail-grid">
+    <dt>Started</dt><dd>{{ view.session.started or '—' }}</dd>
+    <dt>Simulated duration</dt><dd>{% if view.session.duration_minutes is not none %}{{ view.session.duration_minutes }} minutes{% else %}—{% endif %}</dd>
+    <dt>Learner actions</dt><dd>{{ view.session.action_count }}</dd>
+    <dt>Assessment</dt><dd>{% if view.session.assessment_name %}{{ view.session.assessment_name }} · attempt #{{ view.session.attempt_number }}{% else %}—{% endif %}</dd>
+    <dt>Finalized score</dt><dd>{% if view.session.score is not none %}{{ view.session.score }} / 100{% else %}—{% endif %}</dd>
+  </dl>
+</div>
+
+{% if view.result %}
+<section style="margin-bottom:1.5rem">
+  <div class="pw-section-head"><h2>Finalized dimension results</h2><p>Read from the stored scoring result; not recomputed.</p></div>
+  <div class="pw-tablewrap"><table class="pw-table">
+    <thead><tr><th>Dimension</th><th>Result</th></tr></thead>
+    <tbody>{% for dimension in view.result.dimensions.values() %}<tr>
+      <td>{{ dimension.label }}</td>
+      <td>{% if dimension.applicable %}{{ dimension.score }} / 100{% else %}N/A · {{ dimension.na_reason }}{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+<section style="margin-bottom:1.5rem">
+  <div class="pw-section-head"><h2>Chronological activity</h2><p>Factual actions from the persisted learner action log.</p></div>
+  {% if view.actions %}
+  <div class="pw-tablewrap"><table class="pw-table">
+    <thead><tr><th>Simulation time</th><th>Application</th><th>Action</th><th>Target</th><th>Provenance</th></tr></thead>
+    <tbody>{% for row in view.actions %}<tr>
+      <td class="is-num">{{ row.at }}</td><td>{{ row.application }}</td>
+      <td>{{ row.label }}</td><td>{{ row.target or '—' }}</td>
+      <td class="pw-xsmall pw-muted">{{ row.provenance }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<div class="pw-card pw-empty"><h3>No learner actions recorded</h3><p>This session has no persisted learner interactions yet.</p></div>{% endif %}
+</section>
+
+{% if view.incidents %}
+<section>
+  <div class="pw-section-head"><h2>Factual incidents and consequences</h2></div>
+  {% for incident in view.incidents %}<div class="pw-card" style="margin-top:.75rem">
+    <h3>{{ incident.title }}</h3><p class="pw-small pw-muted">Opened at {{ incident.opened_at }}</p>
+    {% if incident.consequences %}<ul>{% for consequence in incident.consequences %}<li>{{ consequence }}</li>{% endfor %}</ul>{% endif %}
+  </div>{% endfor %}
+</section>
+{% endif %}
+{% endblock %}

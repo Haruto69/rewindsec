@@ -31,6 +31,20 @@
       <dl>
         <dt>Cohort</dt><dd>{{ view.student.cohort or '—' }}</dd>
         <dt>Status</dt><dd>{{ view.student.status|capitalize }}</dd>
+        <dt>Enrollment</dt>
+        <dd>
+          {% if view.student.learner_ref %}
+            <span class="pw-chip is-good">Enrolled</span>
+            <button type="button" class="pw-btn is-sm is-alert"
+                    id="pw-reset-enrollment"
+                    data-student-id="{{ view.student.student_id }}">
+              Reset enrollment
+            </button>
+            <span class="pw-xsmall pw-muted" id="pw-reset-enrollment-status" role="status"></span>
+          {% else %}
+            <span class="pw-chip is-caution">Awaiting enrollment</span>
+          {% endif %}
+        </dd>
         <dt>Groups</dt>
         <dd>
           {% if view.groups %}
@@ -102,6 +116,7 @@
               <th scope="col">Status</th>
               <th scope="col">Scored interactions</th>
               <th scope="col">Score</th>
+              <th scope="col"><span class="pw-sr-only">Activity</span></th>
             </tr>
           </thead>
           <tbody>
@@ -160,6 +175,8 @@
               <th scope="col">Mode</th>
               <th scope="col">Profile</th>
               <th scope="col">Status</th>
+              <th scope="col">Duration</th>
+              <th scope="col">Actions</th>
               <th scope="col">Score</th>
             </tr>
           </thead>
@@ -172,7 +189,7 @@
                 <span class="pw-chip is-plain">{{ row.mode|capitalize }}</span>
                 {% if row.assessment_name %}
                 <div class="pw-xsmall pw-muted" style="margin-top:.2rem">
-                  {{ row.assessment_name }}
+                  {{ row.assessment_name }}{% if row.attempt_number %} · attempt #{{ row.attempt_number }}{% endif %}
                 </div>
                 {% endif %}
               </td>
@@ -188,9 +205,12 @@
                   <span class="pw-chip is-caution">Abandoned</span>
                 {% endif %}
               </td>
+              <td class="is-num">{% if row.duration_minutes is not none %}{{ row.duration_minutes }} min{% else %}<span class="pw-muted">—</span>{% endif %}</td>
+              <td class="is-num">{% if row.action_count is not none %}{{ row.action_count }}{% else %}<span class="pw-muted">—</span>{% endif %}</td>
               <td class="is-num">
                 {% if row.score is not none %}{{ row.score }}{% else %}<span class="pw-muted">—</span>{% endif %}
               </td>
+              <td><a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.trainer_session', session_id=row.session_id) }}">View activity</a></td>
             </tr>
             {% endfor %}
           </tbody>
@@ -205,4 +225,8 @@
     </section>
   </div>
 </div>
+{% endblock %}
+
+{% block tr_scripts %}
+<script src="{{ url_for('static', filename='prototype/trainer.js') }}" defer></script>
 {% endblock %}

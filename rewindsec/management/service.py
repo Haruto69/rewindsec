@@ -121,7 +121,14 @@ class ManagementService(object):
     # -- students ----------------------------------------------------------
 
     def list_students(self):
-        return self._repository.list_students()
+        """Trainer-created roster students only.
+
+        Historical ``self_provisioned`` records remain in storage and remain
+        addressable by id for audit, but they are technical identities rather
+        than members of the trainer's roster.
+        """
+        return tuple(student for student in self._repository.list_students()
+                     if student.origin == "trainer")
 
     def get_student(self, student_id):
         return self._repository.get_student(student_id)
@@ -130,6 +137,13 @@ class ManagementService(object):
         student = self._repository.get_student(student_id)
         if student is None:
             raise NotFoundError("no student with id %r" % student_id)
+        return student
+
+    def require_roster_student(self, student_id):
+        """A trainer-created Student, or the same safe absence as no row."""
+        student = self._repository.get_student(student_id)
+        if student is None or student.origin != "trainer":
+            raise NotFoundError("no roster student with id %r" % student_id)
         return student
 
     def create_student(self, display_name, reference=None, cohort=None,
@@ -157,6 +171,19 @@ class ManagementService(object):
 
     def student_for_learner_ref(self, learner_ref):
         return self._repository.student_for_learner_ref(learner_ref)
+
+    ENROLLMENT_REQUIRED = (
+        "Enroll this device with the code from your trainer before starting "
+        "training.")
+
+    def require_enrolled_student(self, learner_ref):
+        """Resolve an active trainer-created roster student without writes."""
+        student = self._repository.student_for_learner_ref(learner_ref)
+        if student is None or student.origin != "trainer" \
+                or student.status != "active":
+            raise ManagementRefused(self.ENROLLMENT_REQUIRED,
+                                    code="enrollment_required")
+        return student
 
     def ensure_student_for_learner_ref(self, learner_ref, display_name=None):
         """The student bound to this server-minted reference, provisioning one
@@ -218,7 +245,10 @@ class ManagementService(object):
         nothing left for a code to do except take the student away from the
         browser that holds them.
         """
-        student = self.require_student(student_id)
+        student = self.require_roster_student(student_id)
+        if student.status != "active":
+            raise ManagementRefused(
+                "That student is not active.", code="student_inactive")
         if student.learner_ref is not None:
             raise ManagementRefused(
                 "That student is already enrolled on a device.",
@@ -285,7 +315,8 @@ class ManagementService(object):
                                     code="enrollment_unusable")
 
         target = self._repository.get_student(record.student_id)
-        if target is None or target.learner_ref is not None:
+        if target is None or target.origin != "trainer" \
+                or target.status != "active" or target.learner_ref is not None:
             raise ManagementRefused(self.ENROLLMENT_UNUSABLE,
                                     code="enrollment_unusable")
 
@@ -324,6 +355,41 @@ class ManagementService(object):
                                     code="enrollment_unusable")
         return bound, True
 
+    def reset_enrollment(self, student_id):
+        """Unbind a roster student so a new device can claim a new code.
+
+        Session ownership and attempts are intentionally untouched. Open,
+        unused codes are revoked; claimed code rows remain as audit history
+        and cannot re-establish the old binding after the reset.
+        """
+        student = self.require_roster_student(student_id)
+        ownerships = self._repository.list_session_ownership(
+            student_id=student.student_id)
+        attempts = self._repository.list_attempts(student_id=student.student_id)
+        active_session = False
+        for ownership in ownerships:
+            owned = self.load_session(ownership.session_id)
+            # An unreadable ordinary session cannot be called active.  An
+            # Assessment with missing/unreadable work is covered by the raw
+            # active-Attempt check below.
+            if owned is not None and owned.is_active:
+                active_session = True
+                break
+        active_attempt = any(attempt.is_active for attempt in attempts)
+        if active_session or active_attempt:
+            raise ManagementRefused(
+                "End the student's active training session before resetting "
+                "enrollment.", code="enrollment_reset_active_work")
+        unbound = self._repository.reset_student_enrollment(
+            student.student_id, student.learner_ref,
+            expected_ownership_count=len(ownerships),
+            expected_attempt_count=len(attempts))
+        if unbound is None:
+            raise ManagementRefused(
+                "Active work or enrollment changed before it could be reset.",
+                code="enrollment_changed")
+        return unbound, student.learner_ref is not None
+
     # -- groups and membership --------------------------------------------
 
     def list_groups(self):
@@ -346,7 +412,7 @@ class ManagementService(object):
 
     def add_member(self, group_id, student_id, added_by=TRAINER_ACTOR):
         self.require_group(group_id)
-        self.require_student(student_id)
+        self.require_roster_student(student_id)
         membership = GroupMembership(
             membership_id=self._ids.new_id("mem"), group_id=group_id,
             student_id=student_id, added_at=self._now(), added_by=added_by)
@@ -367,6 +433,7 @@ class ManagementService(object):
         copied onto the attempt at the time and is never re-derived.
         """
         self.require_group(group_id)
+        self.require_roster_student(student_id)
         return self._repository.remove_membership(group_id, student_id)
 
     def list_memberships(self, group_id=None, student_id=None):
@@ -374,6 +441,7 @@ class ManagementService(object):
                                                  student_id=student_id)
 
     def groups_for_student(self, student_id):
+        self.require_roster_student(student_id)
         groups_by_id = {g.group_id: g for g in self._repository.list_groups()}
         return tuple(
             groups_by_id[m.group_id]
@@ -468,6 +536,8 @@ class ManagementService(object):
 
     def assignment_sources(self, assessment_id, student_id):
         """Every route by which a student already receives an assessment."""
+        self.require_assessment(assessment_id)
+        self.require_roster_student(student_id)
         assignments, memberships, groups_by_id, _students = \
             self._assignment_context(assessment_id)
         return assignment_rules.assignment_sources(
@@ -485,7 +555,7 @@ class ManagementService(object):
 
     def _require_target(self, target_type, target_id):
         if target_type == "student":
-            return self.require_student(target_id)
+            return self.require_roster_student(target_id)
         if target_type == "group":
             return self.require_group(target_id)
         raise ManagementRefused("A target must be a student or a group.",
@@ -581,7 +651,7 @@ class ManagementService(object):
 
         Only when there is no active attempt does the retry policy apply.
         """
-        student = self.ensure_student_for_learner_ref(learner_ref)
+        student = self.require_enrolled_student(learner_ref)
         assessment = self.require_assessment(assessment_id)
         if assessment.is_self_directed_policy:
             raise ManagementRefused(
@@ -642,7 +712,7 @@ class ManagementService(object):
         the feasible required count and the server creates the Attempt before
         its TrainingSession exactly as it does for trainer-assigned work.
         """
-        student = self.ensure_student_for_learner_ref(learner_ref)
+        student = self.require_enrolled_student(learner_ref)
         assessment = self.ensure_self_directed_assessment(focus)
         existing = [self.sync_attempt(a) for a in
                     self._repository.list_attempts(
@@ -865,14 +935,36 @@ class ManagementService(object):
             raise ManagementRefused(
                 "That session does not belong to this learner.",
                 code="not_owner")
-        student = self.ensure_student_for_learner_ref(session.learner_ref)
+        try:
+            student = self.require_enrolled_student(session.learner_ref)
+        except ManagementRefused:
+            self._abandon_raced_start(session_id, learner_ref, attempt_id)
+            raise
         now = self._now()
         ownership = SessionOwnership(
             session_id=session_id, student_id=student.student_id,
             learner_ref=session.learner_ref, focus=session.focus.value,
             mode=session.mode.value, attempt_id=attempt_id,
             started_at=now, last_seen_at=now)
-        return self._repository.record_session_ownership(ownership)
+        recorded = self._repository.record_session_ownership(ownership)
+        try:
+            still_bound = self.require_enrolled_student(session.learner_ref)
+            if still_bound.student_id != student.student_id:
+                raise ManagementRefused(
+                    self.ENROLLMENT_REQUIRED, code="enrollment_required")
+        except ManagementRefused:
+            self._abandon_raced_start(session_id, learner_ref, attempt_id)
+            raise
+        return recorded
+
+    def _abandon_raced_start(self, session_id, learner_ref, attempt_id=None):
+        """Preserve but invalidate work created after enrollment was reset."""
+        self._workstation.abandon_session(
+            session_id, learner_ref, reason="start_enrollment_changed")
+        if attempt_id is not None:
+            attempt = self._repository.get_attempt(attempt_id)
+            if attempt is not None:
+                self.sync_attempt(attempt)
 
     def get_session_ownership(self, session_id):
         return self._repository.get_session_ownership(session_id)

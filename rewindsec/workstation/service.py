@@ -295,6 +295,25 @@ class WorkstationService(object):
         self._save(session, expected)
         return self._project(session)
 
+    def abandon_session(self, session_id, learner_ref=None,
+                        reason="start_enrollment_changed"):
+        """Terminate newly-created work that lost its enrollment race.
+
+        Unlike :meth:`end_session`, abandonment never finalizes a score.  The
+        row remains as factual history, but it cannot accept learner actions.
+        This is an application-layer compensation path, not a learner route.
+        """
+        session = self.require_owned(session_id, learner_ref)
+        if session.status is not SessionStatus.ACTIVE:
+            return self._project(session)
+        expected = session.revision
+        session.record_immediate_event(
+            "session.abandoned", payload={"reason": reason},
+            source=EventSource.SYSTEM, visibility=EventVisibility.INTERNAL)
+        session.abandon()
+        self._save(session, expected)
+        return self._project(session)
+
     # -- reads (no mutation, ever) -----------------------------------------
 
     def snapshot(self, session_id, learner_ref=None):

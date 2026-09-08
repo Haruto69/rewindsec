@@ -47,6 +47,10 @@ from rewindsec.management.records import (Assessment, Assignment, Attempt,
                                           SessionOwnership, Student,
                                           StudentGroup)
 
+
+class _EnrollmentResetChanged(Exception):
+    """Roll back a reset whose checked ownership/Attempt set moved."""
+
 __all__ = ["SqlAlchemyManagementRepository", "metadata", "students_table",
            "groups_table", "memberships_table", "assessments_table",
            "assignments_table", "attempts_table", "session_owners_table",
@@ -562,6 +566,54 @@ class SqlAlchemyManagementRepository(ManagementRepository):
             if result.rowcount == 0:
                 return None
         return self.get_enrollment_code(code)
+
+    def revoke_open_enrollment_codes(self, student_id):
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                enrollment_codes_table.update()
+                .where(sa.and_(
+                    enrollment_codes_table.c.student_id == student_id,
+                    enrollment_codes_table.c.status == "open"))
+                .values(status="revoked"))
+        return int(result.rowcount or 0)
+
+    def reset_student_enrollment(self, student_id, expected_learner_ref,
+                                 expected_ownership_count,
+                                 expected_attempt_count):
+        """One transaction: revoke codes, then conditionally clear binding."""
+        ownership_count = sa.select(sa.func.count()).select_from(
+            session_owners_table).where(
+                session_owners_table.c.student_id == student_id).scalar_subquery()
+        attempt_count = sa.select(sa.func.count()).select_from(
+            attempts_table).where(
+                attempts_table.c.student_id == student_id).scalar_subquery()
+        binding = students_table.c.student_id == student_id
+        if expected_learner_ref is None:
+            binding = sa.and_(binding, students_table.c.learner_ref.is_(None))
+        else:
+            binding = sa.and_(
+                binding,
+                students_table.c.learner_ref == expected_learner_ref)
+        condition = sa.and_(
+            binding,
+            ownership_count == expected_ownership_count,
+            attempt_count == expected_attempt_count)
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    enrollment_codes_table.update()
+                    .where(sa.and_(
+                        enrollment_codes_table.c.student_id == student_id,
+                        enrollment_codes_table.c.status == "open"))
+                    .values(status="revoked"))
+                result = conn.execute(
+                    students_table.update().where(condition)
+                    .values(learner_ref=None))
+                if result.rowcount == 0:
+                    raise _EnrollmentResetChanged()
+        except _EnrollmentResetChanged:
+            return None
+        return self.get_student(student_id)
 
     def bind_student_learner_ref(self, student_id, learner_ref,
                                  expected_learner_ref=None):

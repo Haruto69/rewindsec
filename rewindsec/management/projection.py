@@ -20,12 +20,16 @@ this module in either direction.
 
 from rewindsec.management import analytics
 from rewindsec.management.assignments import effective_assignments
+from rewindsec.management.ports import NotFoundError
 from rewindsec.scoring import state as scoring_state
 from rewindsec.training import policy as training_policy
+from rewindsec.workstation import clock as workstation_clock
+from rewindsec.workstation.content import index as content_index
 
 __all__ = ["dashboard", "students_overview", "student_detail",
            "groups_overview", "group_detail", "assessments_overview",
-           "profile_label", "session_row", "TRAINER_IDENTITY"]
+           "profile_label", "session_row", "session_activity",
+           "TRAINER_IDENTITY"]
 
 #: What the console header says about who is signed in. The deployment has one
 #: instructor role and no user table (see ``security.py``), so this states the
@@ -84,7 +88,8 @@ def session_row(service, ownership, summary=None, session=None,
     assessments_by_id = assessments_by_id or {}
     attempts_by_id = attempts_by_id or {}
 
-    status = summary.status if summary is not None else None
+    status = (summary.status if summary is not None else
+              (session.status.value if session is not None else None))
     student = students_by_id.get(ownership.student_id)
     attempt = attempts_by_id.get(ownership.attempt_id)
     assessment = (assessments_by_id.get(attempt.assessment_id)
@@ -104,10 +109,139 @@ def session_row(service, ownership, summary=None, session=None,
         "status_label": _STATUS_LABELS.get(status, "Unknown"),
         "readable": summary is not None,
         "score": _score_for(session),
+        "duration_minutes": (None if session is None else max(
+            0, workstation_clock.workday_minute(session.now_ms)
+            - workstation_clock.DAY_START_MINUTE)),
+        "action_count": (None if session is None else
+                         len(session.action_log.actions())),
         "attempt_id": ownership.attempt_id,
         "attempt_number": None if attempt is None else attempt.attempt_number,
         "assessment_id": None if attempt is None else attempt.assessment_id,
         "assessment_name": None if assessment is None else assessment.name,
+    }
+
+
+_ACTION_PRESENTATION = {
+    "mail.open": ("Mail", "Opened mail"),
+    "mail.inspect_headers": ("Mail", "Inspected headers"),
+    "mail.inspect_link": ("Mail", "Inspected link"),
+    "mail.inspect_attachment": ("Mail", "Inspected attachment"),
+    "mail.open_link": ("Mail", "Opened link"),
+    "mail.report": ("Mail", "Reported mail"),
+    "mail.delete": ("Mail", "Deleted mail"),
+    "mail.forward": ("Mail", "Forwarded mail"),
+    "mail.reply": ("Mail", "Replied to mail"),
+    "mail.download_attachment": ("Mail", "Downloaded attachment"),
+    "browser.navigate": ("Browser", "Navigated"),
+    "browser.sign_in": ("Browser", "Signed in"),
+    "browser.sign_in_retry": ("Browser", "Retried sign-in"),
+    "browser.release_payment": ("Browser", "Released payment"),
+    "browser.support_action": ("Browser", "Used Service Desk"),
+    "browser.download": ("Browser", "Downloaded file"),
+    "files.inspect": ("Files", "Inspected file"),
+    "files.open": ("Files", "Opened file"),
+    "files.delete": ("Files", "Deleted file"),
+    "files.rename": ("Files", "Renamed file"),
+    "messages.open": ("Messages", "Opened conversation"),
+    "messages.send": ("Messages", "Sent message"),
+    "messages.verify": ("Messages", "Verified on known channel"),
+    "auth.inspect_request": ("Authenticator", "Inspected request"),
+    "auth.inspect_history": ("Authenticator", "Inspected approval history"),
+    "auth.approve": ("Authenticator", "Approved request"),
+    "auth.deny": ("Authenticator", "Denied request"),
+    "directory.open": ("Directory", "Opened contact"),
+    "directory.call": ("Directory", "Called contact"),
+    "notifications.open": ("Notifications", "Opened notification"),
+    "notifications.mark_read": ("Notifications", "Marked notifications read"),
+    "notes.create": ("Notes", "Created note"),
+    "notes.open": ("Notes", "Opened note"),
+    "notes.save": ("Notes", "Saved note"),
+    "notes.delete": ("Notes", "Deleted note"),
+    "session.acknowledge": ("Session", "Acknowledged guidance"),
+}
+
+
+def _target_label(action):
+    """A safe display label from authored metadata, never learner note text."""
+    target = action.target
+    record = None
+    if action.action_type.startswith("mail."):
+        record = content_index.MAIL_BY_ID.get(target)
+        return ((record.get("surface") or {}).get("subject")
+                if record else target)
+    if action.action_type.startswith("files."):
+        record = content_index.FILE_BY_ID.get(target)
+        return (record.get("name") if record else target)
+    if action.action_type.startswith("messages."):
+        record = content_index.CONVERSATION_BY_ID.get(target)
+        return (record.get("name") or record.get("title")
+                if record else target)
+    if action.action_type.startswith("directory."):
+        record = content_index.CONTACT_BY_ID.get(target)
+        return (record.get("name") if record else target)
+    if action.action_type.startswith("auth."):
+        record = content_index.PROMPT_BY_ID.get(target)
+        return (record.get("service") or record.get("title")
+                if record else target)
+    if action.action_type.startswith("notes."):
+        record = content_index.NOTE_BY_ID.get(target)
+        return (record.get("title") if record else ("Note" if target else None))
+    if action.action_type.startswith("browser."):
+        return action.params.get("url") or action.params.get("choice") or target
+    return target
+
+
+def session_activity(service, session_id):
+    """Authenticated-route projection of one persisted, roster-owned session."""
+    ownership = service.get_session_ownership(session_id)
+    if ownership is None:
+        return None
+    student = service.get_student(ownership.student_id)
+    if student is None or student.origin != "trainer":
+        return None
+    session = service.load_session(session_id)
+    if session is None or session.learner_ref != ownership.learner_ref:
+        return None
+    context = _context(service)
+    row = session_row(
+        service, ownership, session=session,
+        students_by_id=context["students_by_id"],
+        assessments_by_id=context["assessments_by_id"],
+        attempts_by_id=context["attempts_by_id"])
+    actions = []
+    for action in session.action_log.actions():
+        application, label = _ACTION_PRESENTATION.get(
+            action.action_type,
+            (action.action_type.split(".", 1)[0].capitalize(),
+             action.action_type.replace("_", " ").replace(".", " · ")))
+        actions.append({
+            "at": workstation_clock.workday_label(action.sim_time_ms),
+            "sim_time_ms": action.sim_time_ms,
+            "application": application,
+            "label": label,
+            "target": _target_label(action),
+            "provenance": action.classification.value,
+        })
+    result = scoring_state.get_result(session)
+    incidents = [{
+        "title": incident.title,
+        "opened_at": workstation_clock.workday_label(incident.opened_at_ms),
+        "consequences": [c.description for c in
+                         session.incidents.consequences_for_incident(
+                             incident.incident_id) if c.description],
+    } for incident in session.incidents.incidents()]
+    return {
+        "trainer": TRAINER_IDENTITY,
+        "student": {
+            "id": student.student_id,
+            "name": student.display_name,
+            "reference": student.reference,
+            "cohort": student.cohort,
+        },
+        "session": row,
+        "actions": actions,
+        "result": None if result is None else result.to_state(),
+        "incidents": incidents,
     }
 
 
@@ -139,6 +273,10 @@ def _session_rows(service, context, student_id=None, load_sessions=True,
                   limit=None):
     ownerships = service.repository.list_session_ownership(
         student_id=student_id)
+    if student_id is None:
+        roster_ids = set(context["students_by_id"])
+        ownerships = [row for row in ownerships
+                      if row.student_id in roster_ids]
     summaries = {s.session_id: s for s in service.session_summaries(
         learner_refs=[o.learner_ref for o in ownerships])}
     if limit is not None:
@@ -158,9 +296,9 @@ def _session_rows(service, context, student_id=None, load_sessions=True,
 def _analytics_rows(service, student_ids=None):
     """Aggregate metrics over every readable stored session in scope."""
     ownerships = service.repository.list_session_ownership()
-    if student_ids is not None:
-        wanted = set(student_ids)
-        ownerships = [o for o in ownerships if o.student_id in wanted]
+    wanted = (set(student_ids) if student_ids is not None else
+              {student.student_id for student in service.list_students()})
+    ownerships = [o for o in ownerships if o.student_id in wanted]
     facts = []
     for ownership in ownerships:
         session = service.load_session(ownership.session_id)
@@ -183,7 +321,14 @@ def dashboard(service):
     context = _context(service)
     rows = _session_rows(service, context, limit=DASHBOARD_SESSION_LIMIT)
 
-    all_summaries = service.session_summaries()
+    roster_ids = set(context["students_by_id"])
+    roster_session_ids = {
+        ownership.session_id
+        for ownership in service.repository.list_session_ownership()
+        if ownership.student_id in roster_ids
+    }
+    all_summaries = [summary for summary in service.session_summaries()
+                     if summary.session_id in roster_session_ids]
     by_status = {"active": 0, "completed": 0, "abandoned": 0}
     for summary in all_summaries:
         if summary.status in by_status:
@@ -304,8 +449,9 @@ def students_overview(service):
 
 
 def student_detail(service, student_id):
-    student = service.get_student(student_id)
-    if student is None:
+    try:
+        student = service.require_roster_student(student_id)
+    except NotFoundError:
         return None
     context = _context(service)
     routes = _student_assignments(context, student_id)

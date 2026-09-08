@@ -37,7 +37,7 @@ from flask import (Blueprint, abort, jsonify, redirect, render_template,
 from rewindsec.management import assessment_policy
 from rewindsec.management import projection as trainer_view
 from rewindsec.prototype import fixtures
-from rewindsec.prototype.api import (SELF_DIRECTED_MODES, SESSION_KEY,
+from rewindsec.prototype.api import (LEARNER_KEY, SELF_DIRECTED_MODES, SESSION_KEY,
                                      register_workstation_api)
 from rewindsec.prototype.trainer_api import register_trainer_api
 
@@ -100,7 +100,6 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         """Values every template under this blueprint needs."""
         return {
             "org": fixtures.world.ORGANIZATION,
-            "learner": fixtures.world.LEARNER,
             "integrity_scope": (
                 "simulation" if request.endpoint in LEARNER_ENDPOINTS
                 else "none"),
@@ -173,8 +172,17 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         says yes and the session has since gone, the ordinary "no session"
         path still runs.
         """
+        learner = None
+        if management_factory is not None:
+            ref = session.get(LEARNER_KEY)
+            if ref:
+                candidate = management_factory().student_for_learner_ref(ref)
+                if candidate is not None and candidate.origin == "trainer" \
+                        and candidate.status == "active":
+                    learner = candidate
         return render_template("prototype/workstation.html",
-                               has_session=bool(session.get(SESSION_KEY)))
+                               has_session=bool(session.get(SESSION_KEY)),
+                               learner_identity=learner)
 
     @bp.route("/results")
     def results():
@@ -236,6 +244,14 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         if detail is None:
             abort(404)
         return render_template("prototype/trainer_student.html",
+                               view=detail, active="students")
+
+    @trainer_page("/trainer/sessions/<session_id>", "trainer_session")
+    def trainer_session(session_id):
+        detail = trainer_view.session_activity(_require_console(), session_id)
+        if detail is None:
+            abort(404)
+        return render_template("prototype/trainer_session.html",
                                view=detail, active="students")
 
     @trainer_page("/trainer/groups", "trainer_groups")

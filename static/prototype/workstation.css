@@ -51,6 +51,8 @@
 }
 .pw-ws > * { position: relative; z-index: 1; }
 .pw-ws.is-bannerless { grid-template-rows: var(--p-topbar) minmax(0, 1fr); }
+.pw-ws.is-bannerless .pw-top { grid-row: 1; }
+.pw-ws.is-bannerless .pw-body { grid-row: 2; }
 
 /* -- status strip -----------------------------------------------------------
  * The one piece of chrome always on screen. It carries identity on the left,

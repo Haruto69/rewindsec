@@ -314,6 +314,8 @@ def headers(client):
 
 
 def start(client, focus="phishing", mode="simulation"):
+    from tests.management_helpers import enroll_http_client
+    enroll_http_client(client)
     response = client.post("/prototype/api/session/start",
                            data=json.dumps({"focus": focus, "mode": mode}),
                            headers=headers(client))
