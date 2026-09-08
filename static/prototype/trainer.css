@@ -220,6 +220,8 @@
 
 .pw-tr-head { margin-bottom: var(--s-8); display: flex; align-items: flex-start; gap: var(--s-6); flex-wrap: wrap; }
 .pw-tr-head-main { flex: 1; min-width: 16rem; }
+.pw-tr-head-side { display: flex; flex-direction: column; align-items: flex-end; gap: var(--s-2); }
+.pw-tr-head-side .pw-xsmall { max-width: 22rem; text-align: right; }
 .pw-tr-head h1 { font-size: var(--t-2xl); letter-spacing: -0.024em; }
 .pw-tr-head p { color: var(--p-muted); font-size: var(--t-md); margin-top: var(--s-3); max-width: 64ch; line-height: 1.6; }
 

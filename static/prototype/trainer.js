@@ -156,6 +156,104 @@
     });
   }
 
+  /* Delete student.
+   *
+   * The trainer expresses one intent — remove this person from the active
+   * roster — and this dialog carries a confirmation and nothing else. The
+   * record itself is retained by the server so that stored sessions,
+   * attempts and results stay attributable, which is why the success copy
+   * says "removed from the active roster" rather than "deleted". There is
+   * no force option here because there is none on the endpoint.
+   */
+  var deleteStudentButton = qs('#pw-delete-student');
+  if (deleteStudentButton) {
+    var delStatus = qs('#pw-delete-student-status');
+    var delScrim = qs('#pw-del-scrim');
+    var delCancel = qs('#pw-del-cancel');
+    var delConfirm = qs('#pw-del-confirm');
+    var delReturnFocus = null;
+
+    var closeDelete = function () {
+      delScrim.hidden = true;
+      if (delReturnFocus && document.contains(delReturnFocus)) {
+        delReturnFocus.focus();
+      }
+      delReturnFocus = null;
+    };
+
+    deleteStudentButton.addEventListener('click', function () {
+      say(delStatus, '');
+      delReturnFocus = document.activeElement;
+      delScrim.hidden = false;
+      delConfirm.focus();
+    });
+
+    delCancel.addEventListener('click', function () {
+      closeDelete();
+      say(delStatus, 'Cancelled. Nothing was changed.');
+    });
+
+    document.addEventListener('keydown', function (event) {
+      if (delScrim.hidden) { return; }
+      if (event.key === 'Escape') { closeDelete(); return; }
+      if (event.key !== 'Tab') { return; }
+      var focusables = delScrim.querySelectorAll('button');
+      if (!focusables.length) { return; }
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    });
+
+    delConfirm.addEventListener('click', function () {
+      closeDelete();
+      deleteStudentButton.disabled = true;
+      say(delStatus, 'Deleting…');
+      post(deleteStudentButton.getAttribute('data-delete-url'),
+           { confirm: true })
+        .then(function (result) {
+          if (!result.ok) {
+            // Active work, or anything else the server refused. The trainer
+            // stays on this page and the record is untouched.
+            deleteStudentButton.disabled = false;
+            say(delStatus,
+                errorText(result, 'That student could not be deleted.'));
+            return;
+          }
+          /* The server reports the outcome; the console echoes it rather
+           * than guessing at it, and then reloads the roster from storage. */
+          try {
+            window.sessionStorage.setItem(
+              'rewindsec-trainer-notice',
+              result.data.message
+                || 'Student removed from the active roster.');
+          } catch (err) { /* storage unavailable; the redirect still holds */ }
+          window.location.href =
+            deleteStudentButton.getAttribute('data-redirect');
+        }).catch(function () {
+          deleteStudentButton.disabled = false;
+          say(delStatus, 'Could not reach the server.');
+        });
+    });
+  }
+
+  /* The outcome message the delete flow left behind, shown once on the
+   * Students list it redirects to. */
+  var noticeSlot = qs('#pw-students-notice');
+  if (noticeSlot) {
+    try {
+      var notice = window.sessionStorage.getItem('rewindsec-trainer-notice');
+      if (notice) {
+        window.sessionStorage.removeItem('rewindsec-trainer-notice');
+        noticeSlot.textContent = notice;
+        noticeSlot.hidden = false;
+      }
+    } catch (err) { /* storage unavailable; the list is still correct */ }
+  }
+
   // =======================================================================
   // Groups and membership
   // =======================================================================

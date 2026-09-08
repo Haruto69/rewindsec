@@ -121,14 +121,47 @@ class ManagementService(object):
     # -- students ----------------------------------------------------------
 
     def list_students(self):
-        """Trainer-created roster students only.
+        """The **active** trainer roster: trainer-created and not deleted.
 
         Historical ``self_provisioned`` records remain in storage and remain
         addressable by id for audit, but they are technical identities rather
-        than members of the trainer's roster.
+        than members of the trainer's roster. A student the trainer has
+        deleted is excluded for the same kind of reason: the row survives so
+        that historical sessions, attempts and results stay resolvable, but it
+        is no longer a member of the roster and no longer counts as one.
+
+        This is the one place the active roster is defined. Every list,
+        picker, count and aggregate reads it, so there is no second, weaker
+        notion of "active student" anywhere.
+        """
+        return tuple(student for student in self._repository.list_students()
+                     if student.origin == "trainer" and not student.is_deleted)
+
+    def known_students(self):
+        """Every trainer-created student, deleted ones included.
+
+        The *historical* read, and deliberately a different method from
+        :meth:`list_students` rather than a flag on it: a caller has to say
+        which of the two questions it is asking. It exists so a completed
+        session, an assessment attempt, a finalized result or an assignment
+        provenance record can still render the identity it belongs to after
+        that student has been removed from the roster. It is never a roster
+        list, and nothing mutable is reached through it.
         """
         return tuple(student for student in self._repository.list_students()
                      if student.origin == "trainer")
+
+    def historical_student(self, student_id):
+        """A trainer-created student for a read-only historical view, or ``None``.
+
+        Deliberately *not* :meth:`require_roster_student`: this is how a
+        historical page resolves a deleted student's display identity without
+        weakening the guard every mutation route depends on.
+        """
+        student = self._repository.get_student(student_id)
+        if student is None or student.origin != "trainer":
+            return None
+        return student
 
     def get_student(self, student_id):
         return self._repository.get_student(student_id)
@@ -140,9 +173,19 @@ class ManagementService(object):
         return student
 
     def require_roster_student(self, student_id):
-        """A trainer-created Student, or the same safe absence as no row."""
+        """An **active** trainer-created Student, or the same safe absence as no row.
+
+        The single roster guard every trainer mutation route goes through. A
+        deleted student fails it exactly the way a legacy ``self_provisioned``
+        row and a made-up id already do -- one refusal, one shape, no oracle
+        telling a caller which of the three it hit. A historical read that
+        genuinely needs a deleted student's identity uses
+        :meth:`historical_student` instead; this guard is never relaxed to
+        serve one.
+        """
         student = self._repository.get_student(student_id)
-        if student is None or student.origin != "trainer":
+        if student is None or student.origin != "trainer" \
+                or student.is_deleted:
             raise NotFoundError("no roster student with id %r" % student_id)
         return student
 
@@ -180,7 +223,7 @@ class ManagementService(object):
         """Resolve an active trainer-created roster student without writes."""
         student = self._repository.student_for_learner_ref(learner_ref)
         if student is None or student.origin != "trainer" \
-                or student.status != "active":
+                or student.status != "active" or student.is_deleted:
             raise ManagementRefused(self.ENROLLMENT_REQUIRED,
                                     code="enrollment_required")
         return student
@@ -316,7 +359,8 @@ class ManagementService(object):
 
         target = self._repository.get_student(record.student_id)
         if target is None or target.origin != "trainer" \
-                or target.status != "active" or target.learner_ref is not None:
+                or target.status != "active" or target.is_deleted \
+                or target.learner_ref is not None:
             raise ManagementRefused(self.ENROLLMENT_UNUSABLE,
                                     code="enrollment_unusable")
 
@@ -355,6 +399,105 @@ class ManagementService(object):
                                     code="enrollment_unusable")
         return bound, True
 
+    def _active_work(self, student):
+        """``(ownerships, attempts, has_active_work)`` for one student.
+
+        The **one** interpretation of "this student is working right now",
+        extracted so enrollment reset and roster deletion cannot drift into
+        two different, differently-weak answers to the same question. Both
+        callers also need the two lists themselves, because the counts they
+        were computed from are what the storage-level guard is conditioned on.
+
+        Active means either of:
+
+        * an ordinary owned session -- Practice, Simulation or Assessment --
+          that is still active; or
+        * an Attempt whose row still says ``active``, whatever state its
+          bound session is in.
+
+        An *unreadable* ordinary session is deliberately not called active: we
+        cannot read it, so we must not assert it is running. An Assessment
+        whose session is unreadable or missing is still caught, because its
+        Attempt row is read directly and needs no session to be readable.
+        """
+        ownerships = self._repository.list_session_ownership(
+            student_id=student.student_id)
+        attempts = self._repository.list_attempts(student_id=student.student_id)
+        active = False
+        for ownership in ownerships:
+            owned = self.load_session(ownership.session_id)
+            if owned is not None and owned.is_active:
+                active = True
+                break
+        if not active:
+            active = any(attempt.is_active for attempt in attempts)
+        return ownerships, attempts, active
+
+    #: Refused because the student is mid-session. One code, one message.
+    STUDENT_DELETE_ACTIVE_WORK = "student_delete_active_work"
+    STUDENT_DELETE_ACTIVE_MESSAGE = (
+        "End the student's active training session before deleting the "
+        "student.")
+
+    def delete_student(self, student_id):
+        """Remove one student from the trainer roster, safely.
+
+        The trainer asks for one thing -- "delete this student" -- and the
+        server decides what that can mean. There is no force flag, no purge
+        endpoint and no bypass: a caller cannot ask for a destructive
+        outcome, only for the intent.
+
+        **Roster deletion never destroys the Student row.** That is the
+        whole design, not an optimisation. Every path that can create work
+        for a learner -- ``register_session``, ``_start_bound_attempt`` --
+        writes an ownership or Attempt row carrying a ``student_id``, and
+        those writes cannot be serialized against a row deletion without a
+        lock this storage layer does not have. So a physical delete could
+        always be raced by a late insert and leave a row pointing at an
+        identity that no longer exists. Keeping the row removes that failure
+        class outright: a late insert lands against a Student that is still
+        there, still resolvable, merely inactive, and the existing
+        compensation in :meth:`register_session` then brings the raced
+        session and Attempt to a safe terminal state.
+
+        Two outcomes, in the order they are decided:
+
+        1. **Refused** (:data:`STUDENT_DELETE_ACTIVE_WORK`) while the student
+           has active work. Every check happens before any write, so a refusal
+           leaves the Student, its binding, its codes, its memberships, its
+           assignments, its Attempts and its sessions byte-identical.
+        2. **Removed from the roster** otherwise, for every student alike --
+           the never-used test record and the one with a term of history. The
+           row stays exactly where it is, marked ``deleted_at``; the roster
+           stops showing it and every mutation route stops accepting it,
+           while ownership, attempts, results, scores, evidence and
+           provenance are not read, not rewritten and not deleted.
+
+        Returns a safe result document carrying no ``learner_ref``, no
+        enrolment code and no internal identifier the console did not already
+        hold.
+        """
+        student = self.require_roster_student(student_id)
+        ownerships, attempts, active = self._active_work(student)
+        if active:
+            raise ManagementRefused(self.STUDENT_DELETE_ACTIVE_MESSAGE,
+                                    code=self.STUDENT_DELETE_ACTIVE_WORK)
+
+        # The counts are what the storage-level guard is conditioned on, so
+        # a session or Attempt appearing between the check above and the
+        # write below turns the write into a no-op and this into a refusal.
+        deleted = self._repository.soft_delete_student(
+            student.student_id, self._now(), student.learner_ref,
+            expected_ownership_count=len(ownerships),
+            expected_attempt_count=len(attempts))
+        if deleted is None:
+            raise ManagementRefused(
+                "Active work or enrollment changed before the student could "
+                "be deleted.", code="student_delete_changed")
+        return {"kind": "removed_from_roster",
+                "student_id": deleted.student_id,
+                "student_name": deleted.display_name}
+
     def reset_enrollment(self, student_id):
         """Unbind a roster student so a new device can claim a new code.
 
@@ -363,20 +506,8 @@ class ManagementService(object):
         and cannot re-establish the old binding after the reset.
         """
         student = self.require_roster_student(student_id)
-        ownerships = self._repository.list_session_ownership(
-            student_id=student.student_id)
-        attempts = self._repository.list_attempts(student_id=student.student_id)
-        active_session = False
-        for ownership in ownerships:
-            owned = self.load_session(ownership.session_id)
-            # An unreadable ordinary session cannot be called active.  An
-            # Assessment with missing/unreadable work is covered by the raw
-            # active-Attempt check below.
-            if owned is not None and owned.is_active:
-                active_session = True
-                break
-        active_attempt = any(attempt.is_active for attempt in attempts)
-        if active_session or active_attempt:
+        ownerships, attempts, active = self._active_work(student)
+        if active:
             raise ManagementRefused(
                 "End the student's active training session before resetting "
                 "enrollment.", code="enrollment_reset_active_work")

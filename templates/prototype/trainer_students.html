@@ -12,6 +12,10 @@
   </div>
 </div>
 
+{# The outcome of a delete performed on the student detail page, reported on
+   the list it redirects to. Filled in by trainer.js; empty otherwise. #}
+<p class="pw-note" id="pw-students-notice" role="status" hidden></p>
+
 {% if view.rows %}
 <div class="pw-tablewrap">
   <table class="pw-table">

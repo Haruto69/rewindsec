@@ -337,9 +337,12 @@ def test_the_real_student_record_holds_no_more_identity_than_the_fixture():
     """
     from rewindsec.management.records import Student
 
+    # ``deleted_at`` is roster lifecycle, not identity: when the trainer took
+    # this record off the active roster. Like ``created_at`` and ``status`` it
+    # says something about the *record*, and nothing whatever about a person.
     assert set(Student._FIELDS) == {
         "student_id", "display_name", "reference", "cohort", "status",
-        "learner_ref", "origin", "created_at"}
+        "learner_ref", "origin", "created_at", "deleted_at"}
     for banned in ("email", "phone", "address", "date_of_birth", "dob",
                    "postcode", "national_id", "manager", "photo", "notes"):
         assert banned not in Student._FIELDS, banned

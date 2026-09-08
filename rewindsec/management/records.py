@@ -183,14 +183,23 @@ class Student(_Record):
     *only* link between a person and their sessions, it is never accepted from
     a request, and it is never derived from a display name -- so no client can
     claim somebody else's history by sending a different name.
+
+    ``deleted_at`` is the roster lifecycle marker. ``None`` -- the only value
+    every row written before this field existed can read back as -- means
+    *on the active roster*. A timestamp means the trainer removed this
+    student from the roster while historical training evidence existed, so
+    the row survives to keep that evidence resolvable and is excluded from
+    every active-roster list, picker, count and mutation route. It is a
+    roster deletion, not an erasure: no session, attempt, result, score or
+    provenance record is touched by setting it.
     """
 
     _FIELDS = ("student_id", "display_name", "reference", "cohort", "status",
-               "learner_ref", "origin", "created_at")
+               "learner_ref", "origin", "created_at", "deleted_at")
 
     def __init__(self, student_id, display_name, reference=None, cohort=None,
                  status="active", learner_ref=None, origin="trainer",
-                 created_at=None):
+                 created_at=None, deleted_at=None):
         self.student_id = validate_identity(student_id, "student_id")
         self.display_name = validate_bounded_str(
             display_name, "display_name", _MAX_NAME)
@@ -203,6 +212,16 @@ class Student(_Record):
         self.origin = _validate_choice(
             origin, ("trainer", "self_provisioned"), "origin")
         self.created_at = _validate_timestamp(created_at, "created_at")
+        self.deleted_at = _validate_timestamp(deleted_at, "deleted_at")
+
+    @property
+    def is_deleted(self):
+        """Whether this student has been removed from the active roster.
+
+        The single predicate every reader uses, so "deleted" is never spelled
+        two different ways in two different modules.
+        """
+        return self.deleted_at is not None
 
     @property
     def initials(self):

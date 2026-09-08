@@ -88,7 +88,12 @@
         {% for row in view.sessions %}
         <tr>
           <td>
-            <a href="{{ url_for('prototype.trainer_student', student_id=row.student_id) }}">{{ row.student_name }}</a>
+            {% if row.student_deleted %}
+              {{ row.student_name }}
+              <span class="pw-chip is-plain">Removed from roster</span>
+            {% else %}
+              <a href="{{ url_for('prototype.trainer_student', student_id=row.student_id) }}">{{ row.student_name }}</a>
+            {% endif %}
             {% if row.student_reference %}
             <div class="pw-xsmall pw-muted">{{ row.student_reference }}</div>
             {% endif %}

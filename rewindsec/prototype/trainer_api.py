@@ -275,6 +275,35 @@ def register_trainer_api(bp, service_factory, require_trainer):
             "reference": student.reference, "cohort": student.cohort,
             "status": student.status}}), 201
 
+    #: Deleting a student removes them from the active roster; the record
+    #: itself is deliberately retained so every stored session, attempt and
+    #: result stays resolvable. The message says exactly that rather than
+    #: claiming an erasure that did not happen. There is no force flag, no
+    #: purge variant and no "also remove history" option in this payload,
+    #: because there is no such operation behind it. The response never
+    #: carries a learner reference, an enrolment code, or an id the console
+    #: did not already hold.
+    _DELETE_MESSAGES = {
+        "removed_from_roster": "Student removed from the active roster.",
+    }
+
+    @route("/api/trainer/students/<student_id>/delete",
+           "api_trainer_delete_student", methods=("POST",))
+    def api_delete_student(student_id):
+        payload = body()
+        confirm = field(payload, "confirm", ("confirm",))
+        if confirm is not True:
+            raise ManagementRefused(
+                "Confirm the deletion before continuing.",
+                code="confirmation_required")
+        result = service_factory().delete_student(student_id)
+        return jsonify({
+            "ok": True,
+            "kind": result["kind"],
+            "student_id": result["student_id"],
+            "message": _DELETE_MESSAGES[result["kind"]],
+        })
+
     @route("/api/trainer/groups", "api_trainer_create_group",
            methods=("POST",))
     def api_create_group():

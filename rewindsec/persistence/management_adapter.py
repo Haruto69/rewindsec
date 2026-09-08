@@ -51,6 +51,11 @@ from rewindsec.management.records import (Assessment, Assignment, Attempt,
 class _EnrollmentResetChanged(Exception):
     """Roll back a reset whose checked ownership/Attempt set moved."""
 
+
+class _StudentDeleteChanged(Exception):
+    """Roll back a deletion whose checked ownership/Attempt set moved."""
+
+
 __all__ = ["SqlAlchemyManagementRepository", "metadata", "students_table",
            "groups_table", "memberships_table", "assessments_table",
            "assignments_table", "attempts_table", "session_owners_table",
@@ -71,6 +76,11 @@ students_table = sa.Table(
     sa.Column("learner_ref", sa.String(128), unique=True),
     sa.Column("origin", sa.String(32), nullable=False),
     sa.Column("created_at", sa.String(64)),
+    # The roster lifecycle marker. Nullable with no default, so every row
+    # written before this column existed reads back as ``None`` -- which is
+    # exactly "on the active roster" -- and no historical row is rewritten to
+    # introduce it. See ``_ensure_additive_columns``.
+    sa.Column("deleted_at", sa.String(64)),
 )
 
 groups_table = sa.Table(
@@ -219,6 +229,36 @@ class SqlAlchemyManagementRepository(ManagementRepository):
 
     def create_schema(self):
         metadata.create_all(self._engine, checkfirst=True)
+        self._ensure_additive_columns()
+
+    #: Columns added to an *existing* table after it first shipped.
+    #:
+    #: ``create_all(checkfirst=True)`` creates missing tables and nothing
+    #: else, so a database created before one of these columns existed would
+    #: otherwise keep a table this module can no longer read. The project has
+    #: no migration framework by deliberate choice (see ``manage.py``), so the
+    #: rule this follows instead is narrow and checkable: **additive,
+    #: nullable, no default, no row rewritten**. Every existing row reads back
+    #: as ``NULL``, which each record's constructor already documents a
+    #: meaning for. Anything that needed to change or drop a column, or
+    #: backfill a value, would be a real migration and does not belong here.
+    _ADDITIVE_COLUMNS = (
+        ("rewindsec2_students", "deleted_at", "VARCHAR(64)"),
+    )
+
+    def _ensure_additive_columns(self):
+        inspector = sa.inspect(self._engine)
+        for table_name, column_name, column_type in self._ADDITIVE_COLUMNS:
+            if not inspector.has_table(table_name):
+                continue
+            present = {column["name"]
+                       for column in inspector.get_columns(table_name)}
+            if column_name in present:
+                continue
+            with self._engine.begin() as conn:
+                conn.execute(sa.text(
+                    'ALTER TABLE "%s" ADD COLUMN "%s" %s'
+                    % (table_name, column_name, column_type)))
 
     # -- students ---------------------------------------------------------
 
@@ -232,6 +272,7 @@ class SqlAlchemyManagementRepository(ManagementRepository):
             "learner_ref": student.learner_ref,
             "origin": student.origin,
             "created_at": student.created_at,
+            "deleted_at": student.deleted_at,
         }
         try:
             with self._engine.begin() as conn:
@@ -250,7 +291,8 @@ class SqlAlchemyManagementRepository(ManagementRepository):
                 .values(display_name=student.display_name,
                         reference=student.reference, cohort=student.cohort,
                         status=student.status, learner_ref=student.learner_ref,
-                        origin=student.origin, created_at=student.created_at))
+                        origin=student.origin, created_at=student.created_at,
+                        deleted_at=student.deleted_at))
             if result.rowcount == 0:
                 raise NotFoundError("no student with id %r" % student.student_id)
         return student
@@ -615,6 +657,90 @@ class SqlAlchemyManagementRepository(ManagementRepository):
             return None
         return self.get_student(student_id)
 
+    # -- roster deletion ---------------------------------------------------
+    #
+    # There is exactly one deletion here, and it does not delete the row.
+    # ``students_table.delete()`` is never issued by roster deletion, because
+    # a physical delete can be raced by an ownership or Attempt insert that
+    # is already in flight and would then reference a student that no longer
+    # exists. Marking the row instead makes that race harmless: the late
+    # insert resolves, and ``register_session``'s existing compensation
+    # abandons the raced session and attempt.
+    #
+    # The operation is one transaction guarded by exactly the condition
+    # ``reset_student_enrollment`` already uses: the student still carries the
+    # binding the service read, and no session ownership row and no Attempt
+    # row has appeared since the service checked for active work. That is what
+    # decides the start-vs-delete race in storage rather than in a
+    # service-level window, and a failed condition rolls the whole transaction
+    # back -- code revocation and membership removal included.
+
+    def _delete_guard(self, student_id, expected_learner_ref,
+                      expected_ownership_count, expected_attempt_count):
+        ownership_count = sa.select(sa.func.count()).select_from(
+            session_owners_table).where(
+                session_owners_table.c.student_id
+                == student_id).scalar_subquery()
+        attempt_count = sa.select(sa.func.count()).select_from(
+            attempts_table).where(
+                attempts_table.c.student_id == student_id).scalar_subquery()
+        condition = students_table.c.student_id == student_id
+        if expected_learner_ref is None:
+            condition = sa.and_(condition,
+                                students_table.c.learner_ref.is_(None))
+        else:
+            condition = sa.and_(
+                condition,
+                students_table.c.learner_ref == expected_learner_ref)
+        # Only an *undeleted* row may be deleted, so a repeated delete is a
+        # refusal rather than a second, silently different outcome.
+        return sa.and_(condition,
+                       students_table.c.deleted_at.is_(None),
+                       ownership_count == expected_ownership_count,
+                       attempt_count == expected_attempt_count)
+
+    def soft_delete_student(self, student_id, deleted_at,
+                            expected_learner_ref, expected_ownership_count,
+                            expected_attempt_count):
+        """Mark a student deleted, revoke open codes, drop current membership.
+
+        The row itself survives untouched apart from ``deleted_at`` and the
+        cleared binding, because it is what every historical session,
+        Attempt, finalized result and assignment provenance record resolves
+        an identity through. Nothing historical is rewritten: claimed
+        enrolment codes stay as audit rows, assignments stay for provenance,
+        and no attempt, ownership, session or score is read, let alone
+        written.
+
+        Returns the updated Student, or ``None`` when the guard did not hold.
+        """
+        condition = self._delete_guard(
+            student_id, expected_learner_ref, expected_ownership_count,
+            expected_attempt_count)
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(
+                    students_table.update().where(condition)
+                    .values(learner_ref=None, deleted_at=deleted_at))
+                if result.rowcount == 0:
+                    raise _StudentDeleteChanged()
+                conn.execute(
+                    enrollment_codes_table.update()
+                    .where(sa.and_(
+                        enrollment_codes_table.c.student_id == student_id,
+                        enrollment_codes_table.c.status == "open"))
+                    .values(status="revoked"))
+                # Current membership is current-roster state only: a group
+                # assignment's reach is resolved from it at read time, while
+                # every Attempt already made carries the provenance it was
+                # created with. Dropping it removes a deleted student from
+                # active member views without touching one historical fact.
+                conn.execute(memberships_table.delete().where(
+                    memberships_table.c.student_id == student_id))
+        except _StudentDeleteChanged:
+            return None
+        return self.get_student(student_id)
+
     def bind_student_learner_ref(self, student_id, learner_ref,
                                  expected_learner_ref=None):
         """A compare-and-set on the student's learner reference.
@@ -706,7 +832,8 @@ class SqlAlchemyManagementRepository(ManagementRepository):
                        display_name=row["display_name"],
                        reference=row["reference"], cohort=row["cohort"],
                        status=row["status"], learner_ref=row["learner_ref"],
-                       origin=row["origin"], created_at=row["created_at"])
+                       origin=row["origin"], created_at=row["created_at"],
+                       deleted_at=row["deleted_at"])
 
     @staticmethod
     def _group(row):

@@ -260,6 +260,28 @@ class ManagementRepository(ABC):
         """
 
     @abstractmethod
+    def soft_delete_student(self, student_id, deleted_at,
+                            expected_learner_ref, expected_ownership_count,
+                            expected_attempt_count):
+        """Atomically mark a student deleted, unbind, revoke, drop membership.
+
+        The **only** deletion this port offers: there is deliberately no
+        operation that removes a Student row, so no implementation and no
+        caller can produce an ownership or Attempt row referring to an
+        identity that no longer exists.
+
+        Guarded by the same conditions as :meth:`reset_student_enrollment`:
+        the binding is unchanged, no session ownership row and no Attempt has
+        appeared since the service checked, and the student is not already
+        deleted. Returns the updated
+        :class:`~rewindsec.management.records.Student` on success and ``None``
+        when the guard did not hold, having written nothing. Historical
+        evidence -- session ownership, attempts, finalized results, assignment
+        provenance and claimed enrolment codes -- is never read or written
+        here.
+        """
+
+    @abstractmethod
     def bind_student_learner_ref(self, student_id, learner_ref,
                                  expected_learner_ref=None):
         """Atomically point one student at one server-minted learner reference.

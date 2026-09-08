@@ -16,6 +16,15 @@
     {{ view.attempts|length }}
     assessment attempt{{ '' if view.attempts|length == 1 else 's' }}.</p>
   </div>
+  <div class="pw-tr-head-side">
+    <button type="button" class="pw-btn is-sm is-alert" id="pw-delete-student"
+            data-student-id="{{ view.student.student_id }}"
+            data-delete-url="{{ url_for('prototype.api_trainer_delete_student', student_id=view.student.student_id) }}"
+            data-redirect="{{ url_for('prototype.trainer_students') }}">
+      Delete student
+    </button>
+    <div class="pw-xsmall pw-muted" id="pw-delete-student-status" role="status"></div>
+  </div>
 </div>
 
 <div class="pw-record">
@@ -223,6 +232,23 @@
       </div>
       {% endif %}
     </section>
+  </div>
+</div>
+
+<div class="pw-scrim" id="pw-del-scrim" hidden>
+  <div class="pw-dialog" role="dialog" aria-modal="true"
+       aria-labelledby="pw-del-title" id="pw-del-dialog">
+    <div class="pw-dialog-head">
+      <h2 id="pw-del-title">Delete student?</h2>
+    </div>
+    <div class="pw-dialog-body">
+      <p>Delete this student from the trainer roster? Historical training
+      records will be preserved.</p>
+    </div>
+    <div class="pw-dialog-foot">
+      <button type="button" class="pw-btn" id="pw-del-cancel">Cancel</button>
+      <button type="button" class="pw-btn is-alert" id="pw-del-confirm">Delete student</button>
+    </div>
   </div>
 </div>
 {% endblock %}

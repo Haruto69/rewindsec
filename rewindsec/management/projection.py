@@ -101,6 +101,10 @@ def session_row(service, ownership, summary=None, session=None,
         "student_name": (student.display_name if student is not None
                          else ownership.student_id),
         "student_reference": None if student is None else student.reference,
+        # Safe roster-lifecycle context, so a historical row can say the
+        # owner is no longer on the roster instead of linking to a page that
+        # correctly refuses. A boolean; never a reference, code or binding.
+        "student_deleted": bool(student is not None and student.is_deleted),
         "focus": ownership.focus,
         "mode": ownership.mode,
         "profile": profile_label(ownership.mode),
@@ -198,8 +202,11 @@ def session_activity(service, session_id):
     ownership = service.get_session_ownership(session_id)
     if ownership is None:
         return None
-    student = service.get_student(ownership.student_id)
-    if student is None or student.origin != "trainer":
+    # Historical lookup, not the roster guard: a completed session, its
+    # actions and its finalized result stay readable after the student has
+    # been removed from the roster. Nothing on this screen mutates anything.
+    student = service.historical_student(ownership.student_id)
+    if student is None:
         return None
     session = service.load_session(session_id)
     if session is None or session.learner_ref != ownership.learner_ref:
@@ -207,7 +214,7 @@ def session_activity(service, session_id):
     context = _context(service)
     row = session_row(
         service, ownership, session=session,
-        students_by_id=context["students_by_id"],
+        students_by_id=context["known_students_by_id"],
         assessments_by_id=context["assessments_by_id"],
         attempts_by_id=context["attempts_by_id"])
     actions = []
@@ -239,6 +246,7 @@ def session_activity(service, session_id):
             "name": student.display_name,
             "reference": student.reference,
             "cohort": student.cohort,
+            "deleted": student.is_deleted,
         },
         "session": row,
         "actions": actions,
@@ -250,6 +258,15 @@ def session_activity(service, session_id):
 def _context(service):
     """The record lookups every screen needs, read once."""
     students = service.list_students()
+    # Two different questions, answered separately and never conflated.
+    # ``students``/``students_by_id`` is the *active roster*: it drives every
+    # list, picker, count and aggregate, so a deleted student disappears from
+    # all of them. ``known_students_by_id`` additionally carries students the
+    # trainer has deleted, and is used only to render the identity a stored
+    # session, attempt or result already belongs to -- history stays readable
+    # and stays attributed, without a deleted student reappearing anywhere a
+    # trainer could act on them.
+    known_students = service.known_students()
     groups = service.list_groups()
     assessments = service.list_assessments()
     trainer_assessments = tuple(
@@ -259,6 +276,7 @@ def _context(service):
     return {
         "students": students,
         "students_by_id": {s.student_id: s for s in students},
+        "known_students_by_id": {s.student_id: s for s in known_students},
         "groups": groups,
         "groups_by_id": {g.group_id: g for g in groups},
         "assessments": assessments,
@@ -276,7 +294,7 @@ def _session_rows(service, context, student_id=None, load_sessions=True,
     ownerships = service.repository.list_session_ownership(
         student_id=student_id)
     if student_id is None:
-        roster_ids = set(context["students_by_id"])
+        roster_ids = set(context["known_students_by_id"])
         ownerships = [row for row in ownerships
                       if row.student_id in roster_ids]
     summaries = {s.session_id: s for s in service.session_summaries(
@@ -289,7 +307,7 @@ def _session_rows(service, context, student_id=None, load_sessions=True,
                    if load_sessions else None)
         rows.append(session_row(
             service, ownership, summary=summaries.get(ownership.session_id),
-            session=session, students_by_id=context["students_by_id"],
+            session=session, students_by_id=context["known_students_by_id"],
             assessments_by_id=context["assessments_by_id"],
             attempts_by_id=context["attempts_by_id"]))
     return rows
@@ -299,7 +317,7 @@ def _analytics_rows(service, student_ids=None):
     """Aggregate metrics over every readable stored session in scope."""
     ownerships = service.repository.list_session_ownership()
     wanted = (set(student_ids) if student_ids is not None else
-              {student.student_id for student in service.list_students()})
+              {student.student_id for student in service.known_students()})
     ownerships = [o for o in ownerships if o.student_id in wanted]
     facts = []
     for ownership in ownerships:
@@ -323,7 +341,7 @@ def dashboard(service):
     context = _context(service)
     rows = _session_rows(service, context, limit=DASHBOARD_SESSION_LIMIT)
 
-    roster_ids = set(context["students_by_id"])
+    roster_ids = set(context["known_students_by_id"])
     roster_session_ids = {
         ownership.session_id
         for ownership in service.repository.list_session_ownership()
@@ -391,7 +409,7 @@ def dashboard(service):
 
 
 def _name_of(context, student_id):
-    student = context["students_by_id"].get(student_id)
+    student = context["known_students_by_id"].get(student_id)
     return student.display_name if student is not None else student_id
 
 

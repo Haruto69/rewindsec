@@ -5,7 +5,13 @@
 <nav class="pw-crumbs" aria-label="Breadcrumb">
   <a href="{{ url_for('prototype.trainer_students') }}">Students</a>
   <span aria-hidden="true">/</span>
-  <a href="{{ url_for('prototype.trainer_student', student_id=view.student.id) }}">{{ view.student.name }}</a>
+  {% if view.student.deleted %}
+    {# Removed from the roster. The record stays readable and stays
+       attributed; there is no page of trainer actions to link to. #}
+    <span>{{ view.student.name }}</span>
+  {% else %}
+    <a href="{{ url_for('prototype.trainer_student', student_id=view.student.id) }}">{{ view.student.name }}</a>
+  {% endif %}
   <span aria-hidden="true">/</span>
   <span>Session activity</span>
 </nav>
@@ -13,7 +19,9 @@
 <div class="pw-tr-head">
   <div class="pw-tr-head-main">
     <h1>Session activity</h1>
-    <p>{{ view.student.name }} · {{ view.session.focus|capitalize }} ·
+    <p>{{ view.student.name }}{% if view.student.deleted %}
+       <span class="pw-chip is-plain">Removed from roster</span>{% endif %} ·
+       {{ view.session.focus|capitalize }} ·
        {{ view.session.mode|capitalize }} · {{ view.session.status_label }}</p>
   </div>
 </div>
