@@ -100,6 +100,14 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         """Values every template under this blueprint needs."""
         return {
             "org": fixtures.world.ORGANIZATION,
+            # The workplace persona the learner occupies inside the synthetic
+            # organisation. Distinct from ``learner_identity``, which is the
+            # real enrolled roster student. In-fiction surfaces address the
+            # persona -- the mailbox, the authored mail, the task list and the
+            # directory all belong to it -- so anything drawn *inside* the
+            # simulated workstation must use this and not the roster name, or
+            # the learner is greeted as one person and written to as another.
+            "persona": fixtures.world.LEARNER,
             "integrity_scope": (
                 "simulation" if request.endpoint in LEARNER_ENDPOINTS
                 else "none"),

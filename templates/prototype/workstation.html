@@ -116,7 +116,11 @@
     <main class="pw-workarea" id="pw-workarea" tabindex="-1">
       <div class="pw-desk" id="pw-desk">
         <div class="pw-desk-inner">
-          <h2>Good morning, {{ learner_identity.display_name.split()[0] if learner_identity else 'learner' }}</h2>
+          {# In-fiction surface: greet the workplace persona, not the roster
+             student. The mailbox below this is the persona's, and every
+             authored message in it opens by name. The real enrolled learner
+             is identified in the rail footer instead. #}
+          <h2>Good morning, {{ persona.given_name }}</h2>
           <p>Your applications are on the left. Work through the day as you
           normally would.</p>
           <div class="pw-desk-tasks" id="pw-desk-tasks" hidden>

@@ -528,3 +528,39 @@ def test_enrolled_workstation_identity_comes_from_roster(flask_app):
     workstation = browser.get("/prototype/workstation").data.decode()
     assert "Mukund V" in workstation
     assert "Aarti Venkatesh" not in workstation
+
+
+def test_desk_greeting_addresses_the_persona_not_the_roster_student(flask_app):
+    """The simulated desk greets the persona; the rail names the real learner.
+
+    Two identities sit on the workstation and they are not interchangeable.
+    ``learner_identity`` is the enrolled roster student, and it belongs to the
+    chrome -- the rail footer, which answers "whose device is this?".
+    ``persona`` is the Northbridge employee the learner occupies, and every
+    in-fiction surface belongs to it: the mailbox, the authored mail, the
+    outstanding tasks. Greeting the roster student on the desk put the two on
+    one screen -- "Good morning, Mukund" directly above a mailbox addressed to
+    Aarti, whose messages all open by her name -- so the greeting is the
+    persona's and the rail footer keeps the roster student.
+    """
+    import app as app_module
+    with flask_app.app_context():
+        manager = app_module.management_service()
+        student = manager.create_student("Mukund V", reference="hon2")
+        code = manager.create_enrollment_code(student.student_id).code
+
+    browser = flask_app.test_client()
+    assert _post(browser, "/prototype/api/enroll", {"code": code}).status_code == 201
+    page = browser.get("/prototype/workstation").data.decode()
+
+    from rewindsec.workstation.content import world as content_world
+    given = content_world.LEARNER["given_name"]
+
+    # The desk greets the persona, and does not greet the roster student.
+    assert "Good morning, %s<" % given in page
+    assert "Good morning, Mukund" not in page
+
+    # The rail footer still identifies the real enrolled learner, and the
+    # persona's full name is still never offered as the learner's own.
+    assert "Mukund V" in page
+    assert content_world.LEARNER["name"] not in page
