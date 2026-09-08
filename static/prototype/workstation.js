@@ -112,7 +112,13 @@
     return {
       mail: {
         folder: 'inbox', selected: null, search: '', headers: false,
-        linkShown: null, composing: null, draft: '', mobileDetail: false
+        linkShown: null, composing: null, draft: '',
+        // Forward is a compose flow, not a button that fires. These three
+        // are presentation state only: nothing is sent, and no world state
+        // exists, until Send posts one `mail.forward` and the authoritative
+        // snapshot comes back.
+        forwarding: null, forwardRecipient: null, forwardDraft: '',
+        mobileDetail: false
       },
       browser: { tabs: [], active: 0, accountDraft: null },
       files: { location: null, selected: null, renaming: false },
@@ -744,14 +750,15 @@
       var count = SNAP.mail.messages.filter(function (m) {
         return m.folder === folder.id && m.unread;
       }).length;
-      var total = SNAP.mail.messages.filter(function (m) {
-        return m.folder === folder.id;
-      }).length;
+      // Unread only, and nothing at all at zero. It must never fall back to
+      // the folder's total: a fully-read Inbox of nine messages showing "9"
+      // reads as nine things still to do. This is the same quantity the Mail
+      // rail badge shows, so the two can never disagree.
       return '<button type="button" class="pw-navitem'
         + (state.folder === folder.id && !state.search ? ' is-active' : '') + '"'
         + ' data-mail-folder="' + folder.id + '">'
         + icon(folder.icon) + '<span>' + esc(folder.label) + '</span>'
-        + '<span class="pw-navitem-count">' + (count || total || '') + '</span>'
+        + '<span class="pw-navitem-count">' + (count || '') + '</span>'
         + '</button>';
     }).join('');
 
@@ -767,13 +774,18 @@
         + '</span>'
         + '<span class="pw-msgrow-subject">' + esc(message.subject) + '</span>'
         + '<span class="pw-msgrow-preview">' + esc(preview.slice(0, 92)) + '</span>'
-        + (message.reported || message.replied || (message.attachments || []).length
+        + (message.reported || message.replied || message.forwarded
+            || (message.attachments || []).length
             ? '<span class="pw-msgrow-flags">'
               + ((message.attachments || []).length
                   ? '<span class="pw-chip">' + icon('paperclip', 'style="width:11px;height:11px"')
                     + ' attachment</span>' : '')
               + (message.reported ? '<span class="pw-chip is-caution">reported</span>' : '')
               + (message.replied ? '<span class="pw-chip">replied</span>' : '')
+              // A real forward leaves a real mark, exactly as a reply does.
+              // Neutral chip: forwarding is neither encouraged nor warned
+              // against, it is just a thing that happened to this message.
+              + (message.forwarded ? '<span class="pw-chip">forwarded</span>' : '')
               + '</span>'
             : '')
         + '</button>';
@@ -892,6 +904,10 @@
         + '</div></div>'
       : '';
 
+    var forwardCompose = state.forwarding === message.id
+      ? renderForwardCompose(message)
+      : '';
+
     var hint = flags().investigation_hints
       ? '<div class="pw-note" style="margin:.75rem 0;font-size:.8rem">'
         + 'You can open the full header, check where a link actually goes, '
@@ -963,7 +979,55 @@
       + '  <div class="pw-reader-body">' + body + links + '</div>'
       + attachments
       + '</div></div>'
-      + compose;
+      + compose
+      + forwardCompose;
+  }
+
+  /* The forward composer. Recipient is a closed list drawn from the internal
+   * Directory in the authoritative snapshot — the client never types an
+   * address, and the id it posts is one the server minted. The original is
+   * quoted underneath exactly as it is rendered in the reader, so nothing
+   * appears here that the learner could not already see. */
+  function internalContacts() {
+    return (SNAP.directory || []).filter(function (contact) {
+      return contact.kind === 'employee';
+    });
+  }
+
+  function renderForwardCompose(message) {
+    var state = APP.mail;
+    var options = internalContacts().map(function (contact) {
+      return '<option value="' + esc(contact.id) + '"'
+        + (state.forwardRecipient === contact.id ? ' selected' : '') + '>'
+        + esc(contact.name) + (contact.role ? ' — ' + esc(contact.role) : '')
+        + '</option>';
+    }).join('');
+
+    var quoted = (message.body || []).map(function (paragraph) {
+      return '<p>' + esc(paragraph) + '</p>';
+    }).join('');
+
+    return '<div class="pw-compose">'
+      + '<h4>Forward: ' + esc(message.subject) + '</h4>'
+      + '<label class="pw-field-label" for="pw-forward-to">To</label>'
+      + '<select id="pw-forward-to" aria-label="Forward to">'
+      + '<option value="">Choose a colleague…</option>' + options
+      + '</select>'
+      + '<label class="pw-field-label" for="pw-forward-note">Add a note (optional)</label>'
+      + '<textarea id="pw-forward-note" aria-label="Note to add to the forward">'
+      + esc(state.forwardDraft) + '</textarea>'
+      + '<div class="pw-reader-quote" style="margin:.5rem 0">'
+      + '<p><b>--------- Forwarded message ---------</b></p>'
+      + '<p>From: ' + esc(message.from_name) + ' &lt;'
+      + esc(message.from_address) + '&gt;</p>'
+      + '<p>Subject: ' + esc(message.subject) + '</p>'
+      + quoted + '</div>'
+      + '<div class="pw-compose-actions">'
+      + '<button type="button" class="pw-btn is-primary is-sm"'
+      + (state.forwardRecipient ? '' : ' disabled')
+      + ' data-mail-forward-send="' + esc(message.id) + '">Send</button>'
+      + '<button type="button" class="pw-btn is-sm" data-mail-forward-cancel="1">Cancel</button>'
+      + '</div></div>';
   }
 
   function attachmentIcon(name) {
@@ -990,6 +1054,9 @@
     APP.mail.headers = false;
     APP.mail.linkShown = null;
     APP.mail.composing = null;
+    APP.mail.forwarding = null;
+    APP.mail.forwardRecipient = null;
+    APP.mail.forwardDraft = '';
     APP.mail.mobileDetail = true;
     render();
     send('mail.open', messageId);
@@ -2089,7 +2156,47 @@
     }
 
     hit = closestData(event.target, 'data-mail-forward');
-    if (hit) { send('mail.forward', hit.value); return; }
+    if (hit) {
+      APP.mail.forwarding = hit.value;
+      APP.mail.forwardRecipient = null;
+      APP.mail.forwardDraft = '';
+      APP.mail.composing = null;
+      render();
+      return;
+    }
+
+    // Cancel is purely local: no request is made, so there is nothing on the
+    // server to undo.
+    hit = closestData(event.target, 'data-mail-forward-cancel');
+    if (hit) {
+      APP.mail.forwarding = null;
+      APP.mail.forwardRecipient = null;
+      APP.mail.forwardDraft = '';
+      render();
+      return;
+    }
+
+    hit = closestData(event.target, 'data-mail-forward-send');
+    if (hit) {
+      var recipient = APP.mail.forwardRecipient;
+      if (!recipient) { return; }
+      var noteBox = qs('#pw-forward-note');
+      var note = noteBox ? noteBox.value : APP.mail.forwardDraft;
+      var forwardParams = { recipient: recipient };
+      if (note) { forwardParams.text = note; }
+      var sourceId = hit.value;
+      send('mail.forward', sourceId, forwardParams).then(function () {
+        // Only close on the authoritative result: if the server refused, the
+        // composer is still there with what was typed in it.
+        if (SNAP && findMail(sourceId) && findMail(sourceId).forwarded) {
+          APP.mail.forwarding = null;
+          APP.mail.forwardRecipient = null;
+          APP.mail.forwardDraft = '';
+          render();
+        }
+      });
+      return;
+    }
 
     hit = closestData(event.target, 'data-mail-report');
     if (hit) { APP.mail.selected = null; send('mail.report', hit.value); return; }
@@ -2509,10 +2616,26 @@
     document.addEventListener('click', handleClick);
     document.addEventListener('submit', handleSubmit);
 
+    // A <select> fires "input" in current browsers but "change" is the
+    // event it has always fired, so the recipient picker listens for both.
+    document.addEventListener('change', function (event) {
+      if (event.target.id === 'pw-forward-to') {
+        APP.mail.forwardRecipient = event.target.value || null;
+        render();
+      }
+    });
+
     document.addEventListener('input', function (event) {
       var node = event.target;
       if (node.id === 'pw-mail-search') { APP.mail.search = node.value; render(); }
       else if (node.id === 'pw-compose-body') { APP.mail.draft = node.value; }
+      else if (node.id === 'pw-forward-note') { APP.mail.forwardDraft = node.value; }
+      else if (node.id === 'pw-forward-to') {
+        APP.mail.forwardRecipient = node.value || null;
+        APP.mail.forwardDraft = (qs('#pw-forward-note') || {}).value
+          || APP.mail.forwardDraft;
+        render();
+      }
       else if (node.id === 'pw-url-input') { ensureTab().urlDraft = node.value; }
       else if (node.id === 'pw-dir-search') { APP.directory.search = node.value; render(); }
       else if (node.id === 'pw-msg-input') { APP.messages.draft = node.value; }

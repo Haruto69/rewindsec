@@ -144,24 +144,37 @@ def _make_mail_facts_available(session, message):
             session.make_fact_available(fact_id)
 
 
-def add_sent_mail(session, subject, to, body, cause_event_id=None):
-    """Record a reply the learner actually wrote, in the Sent folder.
+def add_sent_mail(session, subject, to, body, cause_event_id=None,
+                  kind="reply", forwarded_from=None):
+    """Record something the learner actually sent, in the Sent folder.
 
     Stored because the learner deliberately authored it and the mailbox would
     be incoherent without it -- not as telemetry. It is plain text, bounded by
     :mod:`rewindsec.workstation.actions`, and rendered as text.
+
+    ``kind`` and ``forwarded_from`` are additive and default to what a reply
+    has always been, so an existing session's Sent items keep their exact
+    meaning. ``forwarded_from`` names the *source message id* a forward was
+    made from -- which is what makes "have I already forwarded this one to
+    this person?" answerable from world state alone, with no second counter.
     """
     seq = next_seq(session, "sent_seq")
     sent_id = "m-sent-%d" % seq
     delivery_seq = next_seq(session, "mail_delivery_seq")
-    session.mutate_world(NS_MAIL_SENT, sent_id, {
+    record = {
         "subject": subject,
         "to": to,
         "body": body,
         "received": clock.workday_label(session.now_ms),
         "sent_at_ms": session.now_ms,
         "delivery_seq": delivery_seq,
-    }, cause_event_id=cause_event_id)
+    }
+    if kind and kind != "reply":
+        record["kind"] = kind
+    if forwarded_from:
+        record["forwarded_from"] = forwarded_from
+    session.mutate_world(NS_MAIL_SENT, sent_id, record,
+                         cause_event_id=cause_event_id)
     return sent_id
 
 

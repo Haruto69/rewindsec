@@ -39,6 +39,7 @@ __all__ = [
     "ActionSpec", "SemanticAction", "ACTION_SPECS", "ACTION_TYPES",
     "parse_action_request", "reject_non_finite", "MAX_BODY_BYTES",
     "MAX_NOTE_BODY", "MAX_NOTE_TITLE", "MAX_REPLY_TEXT", "MAX_MESSAGE_TEXT",
+    "MAX_FORWARD_TEXT", "MAX_CONTACT_REF",
     "MAX_URL", "MAX_FILE_NAME", "MAX_ACCOUNT_REF",
 ]
 
@@ -50,10 +51,17 @@ MAX_NOTE_TITLE = 120
 MAX_NOTE_BODY = 8000
 MAX_REPLY_TEXT = 4000
 MAX_MESSAGE_TEXT = 1000
+#: The optional covering note on a forward. A forward is mostly the quoted
+#: original, so the note a learner writes on top of it is a short one -- the
+#: same order as a chat message, not a full reply.
+MAX_FORWARD_TEXT = 1000
 MAX_URL = 200
 MAX_FILE_NAME = 120
 MAX_ACCOUNT_REF = 80
 MAX_RESOURCE_REF = 64
+#: A Directory contact id, as the projection handed it out. Bounded like every
+#: other server-minted reference the client is allowed to name.
+MAX_CONTACT_REF = 64
 
 #: Identifiers the client may name. Deliberately narrow: these are ids the
 #: server itself minted and handed out in a projection, so anything outside
@@ -120,7 +128,15 @@ ACTION_SPECS = {spec.action_type: spec for spec in (
     #: appearing in the projection at all. See
     #: ``rewindsec.workstation.service._mail_delete_permanently``.
     _con("mail.delete_permanently", target="message"),
-    _con("mail.forward", target="message"),
+    #: A real forward, not a flag. The client names the message it is
+    #: forwarding and *one Directory contact id* -- never an address, a
+    #: sender, a subject, a body or an attachment. The server resolves the
+    #: recipient against the internal Directory, composes the Sent copy from
+    #: content the learner can already see, and refuses anything else. See
+    #: ``rewindsec.workstation.service._mail_forward``.
+    _con("mail.forward", target="message",
+         params={"recipient": ("str", True, MAX_CONTACT_REF),
+                 "text": ("str", False, MAX_FORWARD_TEXT)}),
     _con("mail.reply", target="message",
          params={"text": ("str", False, MAX_REPLY_TEXT)}),
     _con("mail.download_attachment", target="message",

@@ -1805,6 +1805,26 @@ CONVERSATIONS = [
                         "Forward me what you got and don't reply to it.",
             },
         },
+        # What Arjun says when the learner actually does the thing he asked
+        # for. Keyed on the *presented occurrence* -- the specific mail id --
+        # so a second, independent payment-redirection occurrence never
+        # inherits this one's acknowledgement, and so forwarding any other
+        # message to Arjun does not produce it.
+        #
+        # This is an ordinary workplace reply and nothing more. It does not
+        # say whether forwarding was the right call, does not name a threat
+        # family, does not mention scoring, and reads identically in
+        # Practice, Simulation and Assessment.
+        "forward_acknowledgements": (
+            {
+                "mail_id": "m-invoice-amend",
+                "from": "Arjun Rao",
+                "text": "Got it, I have the message. I'll check with "
+                        "Facilities on the number we hold. Don't reply to "
+                        "the supplier and don't release anything on CF-20411 "
+                        "until that is confirmed.",
+            },
+        ),
     },
     {
         "id": "conv-priya-menon",

@@ -86,7 +86,8 @@ from rewindsec.scoring.evidence import resolve_opportunities
 from rewindsec.workstation import bootstrap, clock, consequences, worldops
 from rewindsec.workstation.bootstrap import (NS_AUTH_REQUESTS, NS_BROWSER,
                                              NS_DIRECTORY, NS_FILES,
-                                             NS_INCIDENTS, NS_MAIL, NS_MESSAGES,
+                                             NS_INCIDENTS, NS_MAIL,
+                                             NS_MAIL_SENT, NS_MESSAGES,
                                              NS_NOTES, NS_NOTIFICATIONS,
                                              NS_SESSION, NS_TASKS,
                                              AUTH_HISTORY_FACT,
@@ -1018,13 +1019,149 @@ def _mail_delete_permanently(service, session, action, learner_action, mode_flag
     return None
 
 
+#: Directory ``kind`` values a forward may be addressed to. A forward is an
+#: internal escalation -- handing a suspect message to a colleague. Sending it
+#: onward to a vendor (or to anything else outside the organisation) is not
+#: something this workstation offers, so it is refused rather than quietly
+#: accepted.
+_FORWARDABLE_CONTACT_KINDS = frozenset({"employee"})
+
+
+def _resolve_forward_recipient(contact_id):
+    """Resolve a client-supplied Directory contact id, or refuse.
+
+    The only thing the client may name is an id the projection already handed
+    it. There is no path from here to an arbitrary address: the name and the
+    mailbox that end up on the Sent item are read from authored Directory
+    content, never from the request.
+    """
+    contact = ix.CONTACT_BY_ID.get(contact_id)
+    if contact is None:
+        raise UnknownTargetError("No such contact.")
+    if contact.get("kind") not in _FORWARDABLE_CONTACT_KINDS:
+        raise InvalidRequestError(
+            "A message can only be forwarded to a colleague inside the "
+            "organisation.")
+    return contact
+
+
+def _visible_message(session, mail_id, state, record):
+    """The subject/sender/body of a message *as the learner already sees it*.
+
+    Deliberately the same three fields the reader pane renders, and only
+    those: no headers (inspection-only), no link destinations
+    (inspection-only), no attachment provenance, and nothing at all from the
+    authored ``analysis`` block -- no disposition, family, signals, evidence
+    or rationale. Forwarding must not become a way to read something that has
+    not been looked at.
+    """
+    surface = record["surface"]
+    subject = state.get("subject_override") or surface.get("subject", "")
+    from_name = state.get("from_name_override") or surface.get("from_name", "")
+    body = list(surface.get("body") or [])
+    override = state.get("opening_line_override")
+    if override and body:
+        body = [override] + body[1:]
+    return subject, from_name, surface.get("from_address", ""), body
+
+
+def _existing_forward(session, mail_id, to_address):
+    """The Sent id of an identical forward already in the mailbox, if any.
+
+    Revision checking already refuses a stale resubmission, but a retry that
+    arrives on a fresh revision must not be able to produce a second copy of
+    the same forward either. One entry per (source message, recipient) pair
+    is the invariant.
+    """
+    for sent_id, state in sorted(session.world.get_component(NS_MAIL_SENT).items()):
+        if state.get("forwarded_from") == mail_id and state.get("to") == to_address:
+            return sent_id
+    return None
+
+
 def _mail_forward(service, session, action, learner_action, mode_flags):
-    _, record = _require_delivered_mail(session, action.target)
+    """Forward a received message to a colleague in the Directory.
+
+    A real operation, not a flag: it resolves an internal recipient, writes a
+    genuine Sent item quoting the message, and only then marks the original
+    forwarded. Nothing is sent anywhere -- there is no network here -- and
+    nothing about the recipient, the subject or the quoted content comes from
+    the request body.
+    """
+    state, record = _require_delivered_mail(session, action.target)
+    contact = _resolve_forward_recipient(action.params["recipient"])
+    to_address = contact.get("email", "")
+
+    subject, from_name, from_address, body = _visible_message(
+        session, action.target, state, record)
+
+    if _existing_forward(session, action.target, to_address) is not None:
+        # Already forwarded to this person. Make sure the flag agrees and
+        # stop -- no second Sent item, no second notification, and no second
+        # authored consequence.
+        if not state.get("forwarded"):
+            worldops.set_mail_field(session, action.target, forwarded=True)
+        return None
+
+    note = (action.params.get("text") or "").strip()
+    lines = []
+    if note:
+        lines.append(note)
+        lines.append("")
+    lines.append("--------- Forwarded message ---------")
+    lines.append("From: %s <%s>" % (from_name, from_address))
+    lines.append("Subject: %s" % subject)
+    lines.append("")
+    lines.extend(body)
+
+    worldops.add_sent_mail(
+        session, subject="Fwd: %s" % subject, to=to_address,
+        body="\n".join(lines), kind="forward", forwarded_from=action.target)
     worldops.set_mail_field(session, action.target, forwarded=True)
     worldops.raise_notification(
         session, kind="mail", title="Message forwarded",
-        body=record["surface"].get("subject", ""), opens=None)
+        body="%s was forwarded to %s." % (subject, contact.get("name", "")),
+        opens=None)
+    _forward_acknowledgement(session, action.target, contact)
     return None
+
+
+def _forward_acknowledgement(session, mail_id, contact):
+    """Let an authored colleague answer a forward they actually asked for.
+
+    Occurrence-scoped by construction: the authored entry names the exact
+    presented message id, so a different occurrence of the same
+    payment-redirection pattern -- a different message -- never matches it.
+    Exactly-once is persisted on the conversation, so a repeat forward (or a
+    forward of the same message to a second person, then back) cannot append
+    the same line twice. Purely authored dialogue: no correctness signal, no
+    score, no threat label.
+    """
+    contact_id = contact.get("id")
+    for conversation_id, conversation in sorted(ix.CONVERSATION_BY_ID.items()):
+        if conversation.get("contact_id") != contact_id:
+            continue
+        state = session.world.get(NS_MESSAGES, conversation_id)
+        if state is None:
+            continue
+        acknowledged = list(state.get("forward_acknowledged") or ())
+        if mail_id in acknowledged:
+            return
+        for entry in (conversation.get("forward_acknowledgements") or ()):
+            if entry.get("mail_id") != mail_id:
+                continue
+            session.mutate_world(
+                NS_MESSAGES, conversation_id,
+                dict(state, forward_acknowledged=acknowledged + [mail_id]))
+            worldops.append_message(session, conversation_id,
+                                    entry.get("from", ""),
+                                    entry.get("text", ""), unread=True)
+            worldops.raise_notification(
+                session, kind="message", title=entry.get("from", ""),
+                body=entry.get("text", "")[:72],
+                opens={"app": "messages", "conversation_id": conversation_id})
+            return
+        return
 
 
 def _mail_reply(service, session, action, learner_action, mode_flags):
@@ -1485,9 +1622,45 @@ def _require_file(session, file_id):
     return state
 
 
+def acknowledge_file_newness(session, file_id, state=None):
+    """Clear the "new download" badge on *file_id*, and return its state.
+
+    "New" means *the learner has not acknowledged this file yet* -- not "the
+    learner successfully read it". Selecting a row in Files is
+    acknowledgement, so ``files.inspect`` clears it exactly as ``files.open``
+    does; ``files.open`` keeps calling this as a defensive fallback for any
+    path that reaches an open without a row selection first.
+
+    This is purely presentational: it clears ``is_new`` and normalises a
+    legacy ``state="downloaded"`` row to the current ``state``/``is_new``
+    split. It never touches ``state="unavailable"``, never observes a fact,
+    and never reveals anything -- a file that cannot be read still cannot be
+    read once its badge is gone. Idempotent: a file that is already
+    acknowledged is not written again, so a second inspect mutates nothing.
+    """
+    if state is None:
+        state = session.world.get(NS_FILES, file_id)
+    if state is None:
+        return None
+    needs_normalise = state.get("state") == "downloaded"
+    if not (state.get("is_new") or "is_new" not in state or needs_normalise):
+        return state
+    updated = dict(state, is_new=False)
+    if needs_normalise:
+        updated["state"] = "normal"
+    session.mutate_world(NS_FILES, file_id, updated)
+    return updated
+
+
 def _files_inspect(service, session, action, learner_action, mode_flags):
-    _require_file(session, action.target)
+    state = _require_file(session, action.target)
+    # Existing metadata observation, exactly as before -- the Context Ledger
+    # behaviour of inspect is unchanged.
     service._observe(session, file_fact(action.target), learner_action)
+    # Selecting the row is the learner acknowledging the download. This
+    # reveals nothing: the bound document fact stays unobserved until
+    # ``files.open``.
+    acknowledge_file_newness(session, action.target, state)
     return None
 
 
@@ -1506,14 +1679,10 @@ def _files_open(service, session, action, learner_action, mode_flags):
     # before the hostile-macro decision logic runs, so it clears on every
     # attempted open regardless of what that logic decides. This also
     # normalises a legacy state="downloaded" file to the current
-    # state/is_new split -- one write, no schema migration required.
-    needs_normalise = state.get("state") == "downloaded"
-    if state.get("is_new") or "is_new" not in state or needs_normalise:
-        updated = dict(state, is_new=False)
-        if needs_normalise:
-            updated["state"] = "normal"
-        session.mutate_world(NS_FILES, action.target, updated)
-        state = updated
+    # state/is_new split -- one write, no schema migration required. Shared
+    # with ``files.inspect``, which normally gets here first; this remains as
+    # a defensive fallback for any path that opens without selecting a row.
+    state = acknowledge_file_newness(session, action.target, state) or state
 
     origin = state.get("origin_mail")
     if state.get("macro") and _from_hostile_origin(origin):

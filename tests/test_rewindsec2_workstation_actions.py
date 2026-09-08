@@ -285,9 +285,12 @@ def test_mail_delete_permanently_refuses_normal_mail_operations(driver):
     driver.act("mail.delete", "m-benefits")
     driver.act("mail.delete_permanently", "m-benefits")
     for action_type in ("mail.open", "mail.report", "mail.reply",
-                        "mail.forward", "mail.delete"):
+                        "mail.delete"):
         with pytest.raises(UnknownTargetError):
             driver.act(action_type, "m-benefits")
+    with pytest.raises(UnknownTargetError):
+        driver.act("mail.forward", "m-benefits",
+                   {"recipient": "dir-arjun-rao"})
 
 
 def test_mail_delete_permanently_keeps_history_for_scoring(driver):
@@ -517,11 +520,14 @@ def _seed_file(driver, file_id, **fields):
     driver.service._save(session, expected)
 
 
-def test_selecting_a_file_does_not_clear_the_new_badge(driver):
+def test_selecting_a_file_clears_the_new_badge(driver):
+    """Selecting the row *is* the acknowledgement -- "new" tracks whether the
+    learner has seen the download arrive, not whether they read it."""
     driver.deliver_until("m-rate-card")
     driver.act("mail.download_attachment", "m-rate-card", {"index": 0})
-    driver.act("files.inspect", DOWNLOADED_RATE_CARD)
     assert file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)["is_new"] is True
+    driver.act("files.inspect", DOWNLOADED_RATE_CARD)
+    assert file_row(driver.snapshot(), DOWNLOADED_RATE_CARD)["is_new"] is False
 
 
 def test_a_legacy_downloaded_file_projects_as_new(driver):
