@@ -237,8 +237,13 @@
     openModal();
   }
 
-  document.addEventListener('keydown', onPrintScreen, true);
-  document.addEventListener('keyup', onPrintScreen, true);
+  /* PUBLICATION BRANCH (paper/print-ui) -- screenshot deterrence is not
+   * armed here. The modal and its builder are left intact so the surface is
+   * unchanged in every other respect and the dev-panel demonstration still
+   * works; only the two key listeners that would raise it during a capture
+   * are not attached, so PrintScreen, the Snipping Tool, browser capture and
+   * Playwright all produce a clean frame. Restored on main. */
+  void onPrintScreen;
 
   window.RewindSecIntegrity = {
     scope: 'simulation',

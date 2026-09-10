@@ -38,7 +38,11 @@ __all__ = ["dashboard", "students_overview", "student_detail",
 TRAINER_IDENTITY = {
     "name": "Trainer",
     "role": "Authorized console",
-    "organization": "RewindSec 2.0",
+    # PUBLICATION BRANCH (paper/print-ui): the console header carries the
+    # product name without a version. This is a display label only -- nothing
+    # reads, compares or persists it -- so the change is confined to what the
+    # figure shows. Restored on main.
+    "organization": "RewindSec",
 }
 
 #: The derived scaffolding profile, by mode. Derived, never chosen: a trainer

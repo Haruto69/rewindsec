@@ -130,8 +130,11 @@ def create_prototype_blueprint(service_factory=None, updates=None,
         Restricting it further to the learner endpoints keeps the trainer
         console and the v1 application on exactly the headers they had.
         """
-        if request.endpoint in LEARNER_ENDPOINTS:
-            response.headers["Permissions-Policy"] = "display-capture=()"
+        # PUBLICATION BRANCH (paper/print-ui): the display-capture restriction
+        # is not sent, so capture tooling driving this page is unimpeded while
+        # paper figures are taken. Nothing else about the response changes --
+        # CSRF, authorization, privacy filtering and every other header are
+        # untouched. Restored on main.
         return response
 
     # -- learner surfaces --------------------------------------------------

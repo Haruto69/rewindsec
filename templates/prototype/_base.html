@@ -10,7 +10,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <meta name="color-scheme" content="light">
-  <meta name="description" content="RewindSec 2.0 synthetic workstation.">
+  <meta name="description" content="RewindSec synthetic workstation.">
   {# The application enforces CSRF globally on every unsafe method
      (security.init_csrf). The learner API is a set of POSTs, so its
      front end needs the same per-session token every other form uses.
@@ -29,6 +29,11 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='prototype/integrity.css') }}">
   {% endif %}
   {% block styles %}{% endblock %}
+  {# PUBLICATION BRANCH (paper/print-ui) -- grayscale-safe theme for the IEEE
+     paper figures. Loaded LAST, after base.css, the integrity sheet and each
+     page's own stylesheets, so its token overrides win without any of those
+     files being edited. Presentation only; it is not on main. #}
+  <link rel="stylesheet" href="{{ url_for('static', filename='prototype/publication.css') }}">
 </head>
 <body class="pw {% block body_class %}{% endblock %}"
       data-integrity="{{ integrity_scope|default('none') }}">
