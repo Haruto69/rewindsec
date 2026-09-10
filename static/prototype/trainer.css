@@ -440,3 +440,8 @@
   background: rgba(255, 255, 255, .5);
   max-width: none; padding: var(--s-10) var(--s-7);
 }
+
+/* Row-level trainer controls in a history table. Kept on one line so a
+   destructive-looking wrap cannot separate a button from its row. */
+.pw-rowacts { white-space: nowrap; }
+.pw-rowacts .pw-btn + .pw-btn { margin-left: var(--s-2); }

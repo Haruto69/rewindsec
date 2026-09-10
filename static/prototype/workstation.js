@@ -184,7 +184,6 @@
       var changed = !previous
         || payload.snapshot.session.revision !== previous.session.revision;
       SNAP = payload.snapshot;
-      syncClock();
       if (payload.notice && payload.notice.kind === 'confirmation') {
         // Practice, and only Practice, confirms a good decision. The text is
         // the server's; how long it stays on screen is presentation, so it
@@ -277,33 +276,49 @@
   }
 
   // =========================================================================
-  // Simulation clock
+  // Shell clock (PUBLICATION BRANCH: paper/print-ui)
   // =========================================================================
   //
-  // The server owns simulation time. This interpolates between updates purely
-  // so the corner of the screen does not sit frozen, and resynchronises to the
-  // server on every snapshot. Nothing here is ever read back to the server and
-  // no simulation decision depends on it.
+  // The shell clock in the top bar is a **cosmetic local device clock**, and
+  // nothing else. It reads new Date() in this browser, formats HH:MM in the
+  // device's own timezone, and writes that string into one span.
+  //
+  // It is deliberately not the simulation clock. The server owns simulation
+  // time: SimClock, the scheduler, sim_time_ms and every timing decision are
+  // untouched by this branch and continue exactly as before. This value is
+  // never posted, never persisted, never sent into any API, never used for
+  // session duration or scoring, and draws from no RNG stream -- it is a
+  // presentation detail so a publication screenshot shows a natural wall
+  // clock instead of a fixture time. On main the top bar shows the
+  // deterministic simulation clock interpolated from the snapshot.
+  //
+  //     Visible shell clock = local wall clock, presentation only
+  //     Internal SimClock   = deterministic simulation time, authoritative
 
-  var clockAnchor = { simMs: 0, wallMs: 0, rate: 12 };
+  var localClockTimer = null;
 
-  function syncClock() {
-    if (!SNAP) { return; }
-    clockAnchor = {
-      simMs: SNAP.session.sim_time_ms,
-      wallMs: Date.now(),
-      rate: SNAP.session.clock_rate || 12
-    };
+  function localClockLabel() {
+    var now = new Date();
+    var hh = now.getHours();
+    var mm = now.getMinutes();
+    return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
   }
 
-  function nowLabel() {
-    if (!SNAP) { return '09:00'; }
-    if (ended || !SNAP.session.active) { return SNAP.session.clock; }
-    var simMs = clockAnchor.simMs + (Date.now() - clockAnchor.wallMs);
-    var total = 9 * 60 + Math.floor((simMs * clockAnchor.rate) / 60000);
-    var hh = Math.floor(total / 60) % 24;
-    var mm = total % 60;
-    return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
+  function renderLocalClock() {
+    var slot = qs('#pw-clock');
+    if (slot) { slot.textContent = localClockLabel(); }
+  }
+
+  /* Immediately, then at most once a minute -- aligned to the next minute
+   * boundary so the digits change when the device's clock changes rather
+   * than up to a minute late. No network request is made by any of this. */
+  function startLocalClock() {
+    renderLocalClock();
+    if (localClockTimer) { window.clearTimeout(localClockTimer); }
+    var msToNextMinute = 60000 - (Date.now() % 60000);
+    localClockTimer = window.setTimeout(function () {
+      startLocalClock();
+    }, msToNextMinute + 250);
   }
 
   // =========================================================================
@@ -585,7 +600,8 @@
 
   function renderTopBar() {
     if (!SNAP) { return; }
-    qs('#pw-clock').textContent = nowLabel();
+    // The clock is deliberately not rendered from SNAP on this branch; see
+    // the shell-clock note above. Every other top-bar chip still is.
     qs('#pw-mode-label').textContent = MODE_LABELS[SNAP.session.mode]
       || SNAP.session.mode;
     qs('#pw-focus-chip').textContent = FOCUS_LABELS[SNAP.session.focus]
@@ -2602,10 +2618,6 @@
         .then(adopt)
         .catch(function () { /* transient; the next tick tries again */ });
     }, 4000);
-
-    window.setInterval(function () {
-      if (SNAP) { qs('#pw-clock').textContent = nowLabel(); }
-    }, 2000);
   }
 
   // =========================================================================
@@ -2838,7 +2850,6 @@
 
   function ready() {
     if (!SNAP) { throw new Error('no snapshot'); }
-    syncClock();
     render();
     openApp('mail');
     startStream();
@@ -2864,5 +2875,8 @@
     if (window.console) { window.console.error(error); }
   }
 
+  // Independent of boot(): the shell clock is presentation only and must be
+  // correct even while the snapshot is still loading, or if it never arrives.
+  startLocalClock();
   boot();
 }());
