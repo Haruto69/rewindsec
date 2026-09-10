@@ -240,6 +240,100 @@
     });
   }
 
+  /* End an active training session, on trainer authority.
+   *
+   * The trainer expresses one intent — stop this session — and the server
+   * decides everything else. This POST carries a confirmation and nothing
+   * else: no learner reference, no owner, no attempt. The session is
+   * resolved from the persisted ownership record on the server, which is
+   * why the URL is built by the template from url_for and never assembled
+   * from anything the page holds.
+   *
+   * The controls only appear on rows the server rendered as active, and a
+   * session that ended in the meantime answers 409 rather than being ended
+   * twice — so a stale page cannot corrupt anything, it can only be told
+   * that it was stale.
+   */
+  var endSessionButtons = document.querySelectorAll('.pw-end-session');
+  if (endSessionButtons.length) {
+    var endScrim = qs('#pw-end-session-scrim');
+    var endCancel = qs('#pw-end-session-cancel');
+    var endConfirm = qs('#pw-end-session-confirm');
+    var endStatus = qs('#pw-end-session-status');
+    var endTarget = null;
+    var endReturnFocus = null;
+
+    var closeEnd = function () {
+      endScrim.hidden = true;
+      if (endReturnFocus && document.contains(endReturnFocus)) {
+        endReturnFocus.focus();
+      }
+      endReturnFocus = null;
+    };
+
+    Array.prototype.forEach.call(endSessionButtons, function (button) {
+      button.addEventListener('click', function () {
+        say(endStatus, '');
+        endTarget = button;
+        endReturnFocus = document.activeElement;
+        endScrim.hidden = false;
+        endConfirm.focus();
+      });
+    });
+
+    endCancel.addEventListener('click', function () {
+      closeEnd();
+      endTarget = null;
+      say(endStatus, 'Cancelled. The session is still running.');
+    });
+
+    document.addEventListener('keydown', function (event) {
+      if (endScrim.hidden) { return; }
+      if (event.key === 'Escape') { closeEnd(); endTarget = null; return; }
+      if (event.key !== 'Tab') { return; }
+      var focusables = endScrim.querySelectorAll('button');
+      if (!focusables.length) { return; }
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    });
+
+    endConfirm.addEventListener('click', function () {
+      var button = endTarget;
+      closeEnd();
+      endTarget = null;
+      if (!button) { return; }
+      button.disabled = true;
+      say(endStatus, 'Ending session…');
+      post(button.getAttribute('data-end-url'), { confirm: true })
+        .then(function (result) {
+          if (!result.ok) {
+            button.disabled = false;
+            /* 409 means somebody else already ended it. The page is simply
+             * out of date, so reload it rather than leaving a stale row. */
+            if (result.status === 409) {
+              say(endStatus, (result.data && result.data.message)
+                  || errorText(result, 'That session had already ended.'));
+              window.setTimeout(function () { window.location.reload(); }, 900);
+              return;
+            }
+            say(endStatus,
+                errorText(result, 'That session could not be ended.'));
+            return;
+          }
+          say(endStatus, result.data.message || 'Session ended.');
+          window.location.reload();
+        }).catch(function () {
+          button.disabled = false;
+          say(endStatus, 'Could not reach the server.');
+        });
+    });
+  }
+
   /* The outcome message the delete flow left behind, shown once on the
    * Students list it redirects to. */
   var noticeSlot = qs('#pw-students-notice');

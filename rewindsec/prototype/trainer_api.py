@@ -534,6 +534,49 @@ def register_trainer_api(bp, service_factory, require_trainer):
                         "student_id": student.student_id,
                         "enrolled": False})
 
+    #: The trainer-side terminal transition for a still-active session.
+    #:
+    #: Deliberately *not* a trainer call to ``/api/session/end``: that route
+    #: identifies the session from the learner's own signed cookie, and the
+    #: adapter has no business fabricating one. The session is resolved from
+    #: the persisted ownership record instead, and the owning learner
+    #: reference is derived on the server -- there is no field in this
+    #: payload through which an owner, a learner reference, a session owner
+    #: or an attempt could arrive, and ``field()`` refuses any that is sent.
+    #:
+    #: Every rule behind this lives in
+    #: :meth:`~rewindsec.management.service.ManagementService
+    #: .end_session_for_student`. This view decides nothing: it checks that a
+    #: confirmation was given, calls the service, and maps its result onto a
+    #: status code.
+    _END_SESSION_MESSAGES = {
+        "ended": "Session ended. Recorded activity and results are preserved.",
+        "already_ended":
+            "That session had already ended. Nothing was changed.",
+    }
+
+    @route("/api/trainer/students/<student_id>/sessions/<session_id>/end",
+           "api_trainer_end_session", methods=("POST",))
+    def api_end_session(student_id, session_id):
+        payload = body()
+        confirm = field(payload, "confirm", ("confirm",))
+        if confirm is not True:
+            raise ManagementRefused(
+                "Confirm before ending the session.",
+                code="confirmation_required")
+        result = service_factory().end_session_for_student(student_id,
+                                                           session_id)
+        return jsonify({
+            "ok": True,
+            "kind": result["kind"],
+            "session_id": result["session_id"],
+            "student_id": result["student_id"],
+            "status": result["status"],
+            "attempt_status": result["attempt_status"],
+            "student_has_active_work": result["student_has_active_work"],
+            "message": _END_SESSION_MESSAGES[result["kind"]],
+        }), (200 if result["kind"] == "ended" else 409)
+
     # -- attempts and results ----------------------------------------------
 
     @route("/api/trainer/attempts", "api_trainer_attempts")

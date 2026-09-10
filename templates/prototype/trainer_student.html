@@ -174,6 +174,8 @@
         <p>Every stored session this student owns, self-directed and
         assessment alike.</p>
       </div>
+      <div class="pw-xsmall pw-muted" id="pw-end-session-status" role="status"
+           style="margin-bottom:.5rem"></div>
       {% if view.sessions %}
       <div class="pw-tablewrap">
         <table class="pw-table">
@@ -187,6 +189,7 @@
               <th scope="col">Duration</th>
               <th scope="col">Actions</th>
               <th scope="col">Score</th>
+              <th scope="col"><span class="pw-sr-only">Row actions</span></th>
             </tr>
           </thead>
           <tbody>
@@ -219,7 +222,19 @@
               <td class="is-num">
                 {% if row.score is not none %}{{ row.score }}{% else %}<span class="pw-muted">—</span>{% endif %}
               </td>
-              <td><a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.trainer_session', session_id=row.session_id) }}">View activity</a></td>
+              <td class="pw-rowacts">
+                <a class="pw-btn is-sm is-quiet" href="{{ url_for('prototype.trainer_session', session_id=row.session_id) }}">View activity</a>
+                {#- A session can only be ended while it is genuinely still
+                    running. A completed or abandoned row gets no control at
+                    all, and the server refuses one anyway. -#}
+                {% if row.readable and row.status == 'active' %}
+                <button type="button" class="pw-btn is-sm pw-end-session"
+                        data-session-id="{{ row.session_id }}"
+                        data-end-url="{{ url_for('prototype.api_trainer_end_session', student_id=view.student.student_id, session_id=row.session_id) }}">
+                  End session
+                </button>
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>
@@ -232,6 +247,24 @@
       </div>
       {% endif %}
     </section>
+  </div>
+</div>
+
+<div class="pw-scrim" id="pw-end-session-scrim" hidden>
+  <div class="pw-dialog" role="dialog" aria-modal="true"
+       aria-labelledby="pw-end-session-title" id="pw-end-session-dialog">
+    <div class="pw-dialog-head">
+      <h2 id="pw-end-session-title">End this training session?</h2>
+    </div>
+    <div class="pw-dialog-body">
+      <p>This stops the learner's current session. Recorded activity and
+      results are preserved. The learner will no longer be able to continue
+      this session.</p>
+    </div>
+    <div class="pw-dialog-foot">
+      <button type="button" class="pw-btn" id="pw-end-session-cancel">Cancel</button>
+      <button type="button" class="pw-btn is-primary" id="pw-end-session-confirm">End session</button>
+    </div>
   </div>
 </div>
 

@@ -24,6 +24,22 @@
        {{ view.session.focus|capitalize }} ·
        {{ view.session.mode|capitalize }} · {{ view.session.status_label }}</p>
   </div>
+  {#- The same trainer operation offered on the student record, on the screen
+      a trainer is most likely to be looking at when they notice a session is
+      still running. Only for a session that is genuinely still active, and
+      only while its owner is on the roster -- the server refuses every other
+      case regardless of what this template renders. -#}
+  {% if view.session.status == 'active' and not view.student.deleted %}
+  <div class="pw-tr-head-side">
+    <button type="button" class="pw-btn is-sm pw-end-session"
+            data-session-id="{{ view.session.session_id }}"
+            data-reload="1"
+            data-end-url="{{ url_for('prototype.api_trainer_end_session', student_id=view.student.id, session_id=view.session.session_id) }}">
+      End session
+    </button>
+    <div class="pw-xsmall pw-muted" id="pw-end-session-status" role="status"></div>
+  </div>
+  {% endif %}
 </div>
 
 <div class="pw-card" style="margin-bottom:1.25rem">
@@ -63,6 +79,24 @@
   {% else %}<div class="pw-card pw-empty"><h3>No learner actions recorded</h3><p>This session has no persisted learner interactions yet.</p></div>{% endif %}
 </section>
 
+<div class="pw-scrim" id="pw-end-session-scrim" hidden>
+  <div class="pw-dialog" role="dialog" aria-modal="true"
+       aria-labelledby="pw-end-session-title" id="pw-end-session-dialog">
+    <div class="pw-dialog-head">
+      <h2 id="pw-end-session-title">End this training session?</h2>
+    </div>
+    <div class="pw-dialog-body">
+      <p>This stops the learner's current session. Recorded activity and
+      results are preserved. The learner will no longer be able to continue
+      this session.</p>
+    </div>
+    <div class="pw-dialog-foot">
+      <button type="button" class="pw-btn" id="pw-end-session-cancel">Cancel</button>
+      <button type="button" class="pw-btn is-primary" id="pw-end-session-confirm">End session</button>
+    </div>
+  </div>
+</div>
+
 {% if view.incidents %}
 <section>
   <div class="pw-section-head"><h2>Factual incidents and consequences</h2></div>
@@ -72,4 +106,8 @@
   </div>{% endfor %}
 </section>
 {% endif %}
+{% endblock %}
+
+{% block tr_scripts %}
+<script src="{{ url_for('static', filename='prototype/trainer.js') }}" defer></script>
 {% endblock %}

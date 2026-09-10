@@ -47,6 +47,7 @@ from rewindsec.management.records import (Assessment, Assignment, Attempt,
                                           StudentGroup)
 from rewindsec.persistence.ports import SessionNotFoundError
 from rewindsec.scoring import state as scoring_state
+from rewindsec.workstation.errors import StaleRevisionConflict
 
 __all__ = ["ManagementService", "ManagementRefused", "DuplicateAssignment",
            "TRAINER_ACTOR", "SYSTEM_ACTOR", "utc_now"]
@@ -94,9 +95,10 @@ class ManagementService(object):
     """Server-authoritative operations on the RewindSec 2.0 administrative records.
 
     ``workstation`` is the :class:`~rewindsec.workstation.service
-    .WorkstationService`; it is used only to *start* an attempt's session, so
-    that a session is still created by exactly one piece of code with exactly
-    one set of rules. ``sessions`` is the
+    .WorkstationService`; it is used only to *start*, *end* and *abandon*
+    sessions, so that every session state transition in the system still goes
+    through exactly one piece of code with exactly one set of rules.
+    ``sessions`` is the
     :class:`~rewindsec.persistence.ports.SessionRepository` and ``directory``
     the :class:`~rewindsec.persistence.ports.SessionDirectory` -- reads only,
     for history and analytics.
@@ -1099,6 +1101,108 @@ class ManagementService(object):
 
     def get_session_ownership(self, session_id):
         return self._repository.get_session_ownership(session_id)
+
+    #: Refused because the named session is not the named student's.
+    SESSION_NOT_OWNED = "session_not_owned"
+
+    def end_session_for_student(self, student_id, session_id):
+        """End one roster student's still-active session, on trainer authority.
+
+        The stuck case this exists for: a learner's browser session is the
+        only thing that can reach ``/api/session/end``, because that route
+        identifies the session from the learner's own signed cookie. When the
+        cookie is lost -- a cleared browser, a different device, an
+        enrollment that moved -- the TrainingSession row stays ``active``
+        forever, and :meth:`_active_work` therefore refuses enrollment reset
+        and roster deletion for as long as it does. Nothing in the system
+        could move that row to a terminal state.
+
+        What this does **not** do, and why the trainer cannot ask for it:
+
+        * It does not impersonate the learner. The owning ``learner_ref`` is
+          read from the persisted :class:`SessionOwnership` row, checked
+          against the session's own ``learner_ref``, and never accepted from
+          a caller. There is no parameter here through which an owner, a
+          learner reference or an attempt could arrive.
+        * It does not delete the session, reset any simulation state, rewind
+          the clock, or draw from any RNG stream. It is exactly the ordinary
+          end-of-session transition
+          (:meth:`WorkstationService.end_session
+          <rewindsec.workstation.service.WorkstationService.end_session>`),
+          which records ``session.ended``, finalizes the one Batch 4 result
+          the session will ever have, and preserves every fact.
+        * It does not recompute or invent an assessment outcome. The bound
+          Attempt is reconciled through :meth:`sync_attempt`, under exactly
+          the policy a learner-ended session goes through: an attempt whose
+          required scored-interaction boundary was not satisfied is recorded
+          ``abandoned``/``requirement_unmet``, never falsely ``completed``.
+
+        Idempotent. A session that is already terminal -- because the learner
+        ended it, because a previous trainer request ended it, or because the
+        two raced -- is reported as already ended rather than touched again.
+        """
+        student = self.require_roster_student(student_id)
+        ownership = self._repository.get_session_ownership(session_id)
+        if ownership is None:
+            raise NotFoundError("no session with id %r" % session_id)
+        if ownership.student_id != student.student_id:
+            # The trainer named a student and a session that do not belong
+            # together. Refused rather than reinterpreted: the student in the
+            # URL is the authorization subject, not a hint.
+            raise ManagementRefused(
+                "That session does not belong to this student.",
+                code=self.SESSION_NOT_OWNED)
+        session = self.load_session(session_id)
+        if session is None:
+            raise NotFoundError("no session with id %r" % session_id)
+        if session.learner_ref != ownership.learner_ref:
+            # Ownership is authoritatively the session's own learner_ref.
+            # A row that disagrees is a fault, not a licence to end somebody
+            # else's work.
+            raise ManagementRefused(
+                "That session's ownership record does not match the session.",
+                code=self.SESSION_NOT_OWNED)
+
+        if not session.is_active:
+            return self._ended_session_result(
+                student, session_id, "already_ended")
+
+        try:
+            self._workstation.end_session(session_id, ownership.learner_ref)
+        except StaleRevisionConflict:
+            # The learner (or another trainer request) moved the session
+            # between the read above and the write. Re-read the truth: if it
+            # is terminal now, the intent was satisfied by whoever won, and
+            # this is a safe idempotent answer rather than a second write.
+            settled = self.load_session(session_id)
+            if settled is not None and not settled.is_active:
+                return self._ended_session_result(
+                    student, session_id, "already_ended")
+            raise ManagementRefused(
+                "That session changed while it was being ended. Try again.",
+                code="session_end_conflict")
+
+        # Same reconciliation the learner path performs, for the same reason:
+        # the attempt's result is *read* from the session's now-finalized,
+        # immutable result and never computed here.
+        attempt = self._repository.attempt_for_session(session_id)
+        if attempt is not None:
+            self.sync_attempt(attempt)
+        return self._ended_session_result(student, session_id, "ended")
+
+    def _ended_session_result(self, student, session_id, kind):
+        """A safe result document describing a session's terminal state."""
+        session = self.load_session(session_id)
+        attempt = self._repository.attempt_for_session(session_id)
+        _ownerships, _attempts, active = self._active_work(student)
+        return {
+            "kind": kind,
+            "session_id": session_id,
+            "student_id": student.student_id,
+            "status": None if session is None else session.status.value,
+            "attempt_status": None if attempt is None else attempt.status,
+            "student_has_active_work": active,
+        }
 
     def sessions_for_student(self, student_id):
         return self._repository.list_session_ownership(student_id=student_id)
